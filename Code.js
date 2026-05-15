@@ -25,26 +25,44 @@ function doPost(e) {
   // 2. 擷取所有數字 (過濾掉文字，只取數值)
   const nums = userMessage.match(/\d+/g);
 
-  // 如果成功擷取到 6 個以上的數字，代表有兩組完整的 收縮/舒張/脈搏
-  if (nums && nums.length >= 6) {
+  // 檢查是否至少有一組 (3個數字) 或 兩組 (6個數字)
+  if (nums && nums.length >= 3) {
     const sys1 = parseInt(nums[0], 10);
     const dia1 = parseInt(nums[1], 10);
     const pul1 = parseInt(nums[2], 10);
-    const sys2 = parseInt(nums[3], 10);
-    const dia2 = parseInt(nums[4], 10);
-    const pul2 = parseInt(nums[5], 10);
+    
+    let sys2 = "";
+    let dia2 = "";
+    let pul2 = "";
+    
+    let avgSys = sys1;
+    let avgDia = dia1;
+    let avgPul = pul1;
 
-    // 3. 計算平均值
-    const avgSys = Math.round((sys1 + sys2) / 2);
-    const avgDia = Math.round((dia1 + dia2) / 2);
-    const avgPul = Math.round((pul1 + pul2) / 2);
+    // 若有兩組數據
+    if (nums.length >= 6) {
+      sys2 = parseInt(nums[3], 10);
+      dia2 = parseInt(nums[4], 10);
+      pul2 = parseInt(nums[5], 10);
 
-    // 4. 狀態評估邏輯
+      // 3. 計算平均值
+      avgSys = Math.round((sys1 + sys2) / 2);
+      avgDia = Math.round((dia1 + dia2) / 2);
+      avgPul = Math.round((pul1 + pul2) / 2);
+    }
+
+    // 4. 根據 722 原則評估狀態
     let status = "✅ 正常";
-    if (avgSys < 100 || avgDia < 60) {
-      status = "⚠️ 偏低";
-    } else if (avgSys > 140 || avgDia > 90) {
+    if (avgSys >= 130 || avgDia >= 80) {
       status = "🔴 偏高";
+    } else if (avgSys < 110 && avgDia < 60) {
+      status = "⚠️ 偏低";
+    } else if (avgSys < 110 && avgDia >= 60) {
+      status = "✅ 正常 (偏低點)";
+    } else if (avgSys >= 110 && avgDia < 60) {
+      status = "⚠️ 舒張壓偏低";
+    } else {
+      status = "✅ 正常";
     }
 
     // 5. 取得當天日期 (格式：M/D)
@@ -77,8 +95,8 @@ sheet.appendRow([
     // 7. 回覆 LINE 訊息，讓 Susi 或您知道紀錄成功
     replyToLine(replyToken, `✅ 已成功紀錄 (${period})\n平均：${avgSys} / ${avgDia}\n狀態：${status}`);
   } else {
-    // 數字不夠 6 個的錯誤提示
-    replyToLine(replyToken, "格式似乎不對喔！請確認是否有兩組完整的血壓數據。");
+    // 數字不夠 3 個的錯誤提示
+    replyToLine(replyToken, "格式似乎不對喔！請確認是否有提供至少一組血壓數據。");
   }
 
   return ContentService.createTextOutput("Success");
