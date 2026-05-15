@@ -1,9 +1,9 @@
-// 請填入您在 LINE Developers 後台取得的 Channel Access Token
-const LINE_CHANNEL_ACCESS_TOKEN = PropertiesService
-  .getScriptProperties()
-  .getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+// 從腳本屬性中安全地取得 LINE Channel Access Token
+const LINE_CHANNEL_ACCESS_TOKEN = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
 
-  
+/**
+ * 處理 LINE Webhook 傳來的 POST 請求
+ */
 function doPost(e) {
   // 解析 LINE 傳來的 JSON 格式資料
   const event = JSON.parse(e.postData.contents).events[0];
@@ -25,44 +25,26 @@ function doPost(e) {
   // 2. 擷取所有數字 (過濾掉文字，只取數值)
   const nums = userMessage.match(/\d+/g);
 
-  // 檢查是否至少有一組 (3個數字) 或 兩組 (6個數字)
-  if (nums && nums.length >= 3) {
+  // 如果成功擷取到 6 個以上的數字，代表有兩組完整的 收縮/舒張/脈搏
+  if (nums && nums.length >= 6) {
     const sys1 = parseInt(nums[0], 10);
     const dia1 = parseInt(nums[1], 10);
     const pul1 = parseInt(nums[2], 10);
-    
-    let sys2 = "";
-    let dia2 = "";
-    let pul2 = "";
-    
-    let avgSys = sys1;
-    let avgDia = dia1;
-    let avgPul = pul1;
+    const sys2 = parseInt(nums[3], 10);
+    const dia2 = parseInt(nums[4], 10);
+    const pul2 = parseInt(nums[5], 10);
 
-    // 若有兩組數據
-    if (nums.length >= 6) {
-      sys2 = parseInt(nums[3], 10);
-      dia2 = parseInt(nums[4], 10);
-      pul2 = parseInt(nums[5], 10);
+    // 3. 計算平均值
+    const avgSys = Math.round((sys1 + sys2) / 2);
+    const avgDia = Math.round((dia1 + dia2) / 2);
+    const avgPul = Math.round((pul1 + pul2) / 2);
 
-      // 3. 計算平均值
-      avgSys = Math.round((sys1 + sys2) / 2);
-      avgDia = Math.round((dia1 + dia2) / 2);
-      avgPul = Math.round((pul1 + pul2) / 2);
-    }
-
-    // 4. 根據 722 原則評估狀態
+    // 4. 狀態評估邏輯
     let status = "✅ 正常";
-    if (avgSys >= 130 || avgDia >= 80) {
-      status = "🔴 偏高";
-    } else if (avgSys < 110 && avgDia < 60) {
+    if (avgSys < 100 || avgDia < 60) {
       status = "⚠️ 偏低";
-    } else if (avgSys < 110 && avgDia >= 60) {
-      status = "✅ 正常 (偏低點)";
-    } else if (avgSys >= 110 && avgDia < 60) {
-      status = "⚠️ 舒張壓偏低";
-    } else {
-      status = "✅ 正常";
+    } else if (avgSys > 140 || avgDia > 90) {
+      status = "🔴 偏高";
     }
 
     // 5. 取得當天日期 (格式：M/D)
@@ -71,7 +53,8 @@ function doPost(e) {
     const twTime = new Date(today.getTime() + (8 * 60 * 60 * 1000));
     const dateString = (twTime.getUTCMonth() + 1) + '/' + twTime.getUTCDate();
 
-    // 6. 將資料 Append 到媽媽血壓的 Google Sheet 最後一行
+    // 6. 將資料 Append 到指定的 Google Sheet
+    // 請確保這些 ID 和 GID 是正確的
     const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
     const targetGid = 2143792150;
 
@@ -92,57 +75,19 @@ function doPost(e) {
       status
     ]);
 
-    // 7. 取得最近三天的紀錄並回覆 LINE
-    // Google Sheets 的 getDateRange().getValues() 取得的日期可能是 Date 物件
-    const data = sheet.getDataRange().getValues();
-    let historyMsg = "\n\n【最近三天紀錄】";
-    let datesFound = [];
-    let recentRecords = [];
-    
-    // 從最後一行往上找 (包含剛寫入的那行)
-    // 假設第0行是標題，所以 i >= 1
-    for (let i = data.length - 1; i >= 1; i--) {
-      const row = data[i];
-      let rowDate = row[0]; // A欄: 日期
-      
-      // 如果 Google Sheet 讀出來的是 Date 物件，將其轉為字串比較
-      if (rowDate instanceof Date) {
-        rowDate = (rowDate.getMonth() + 1) + '/' + rowDate.getDate();
-      } else {
-        rowDate = String(rowDate); // 確保轉為字串
-      }
-      
-      if (!datesFound.includes(rowDate)) {
-        if (datesFound.length >= 3) {
-          break; // 已經收集到三個不同日期的紀錄
-        }
-        datesFound.push(rowDate);
-      }
-      
-      const rPeriod = row[1];
-      const rAvgSys = row[8];
-      const rAvgDia = row[9];
-      const rStatus = row[11];
-      recentRecords.unshift(`${rowDate} ${rPeriod} ${rAvgSys}/${rAvgDia} ${rStatus}`);
-    }
-
-    if (recentRecords.length > 0) {
-      historyMsg += "\n" + recentRecords.join("\n");
-    } else {
-      historyMsg = "";
-    }
-
-    const firstLine = `收到了！這筆血壓是 ${avgSys} / ${avgDia}`;
-    replyToLine(replyToken, `${firstLine}\n✅ 已成功紀錄 (${period})\n狀態：${status}${historyMsg}`);
+    // 7. 回覆 LINE 訊息
+    replyToLine(replyToken, `✅ 已成功紀錄 (${period})\n平均：${avgSys} / ${avgDia}\n狀態：${status}`);
   } else {
-    // 數字不夠 3 個的錯誤提示
-    replyToLine(replyToken, "格式似乎不對喔！請確認是否有提供至少一組血壓數據。");
+    // 數字不夠 6 個的錯誤提示
+    replyToLine(replyToken, "格式似乎不對喔！請確認是否有兩組完整的血壓數據。");
   }
 
   return ContentService.createTextOutput("Success");
 }
 
-// 發送回覆訊息給 LINE 的函式
+/**
+ * 發送回覆訊息給 LINE 的函式
+ */
 function replyToLine(replyToken, text) {
   const url = 'https://api.line.me/v2/bot/message/reply';
   const payload = {
