@@ -1,5 +1,7 @@
 // 從腳本屬性中安全地取得 LINE Channel Access Token
-const LINE_CHANNEL_ACCESS_TOKEN = PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN');
+const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
+  ? PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN')
+  : '';
 
 /**
  * 處理 LINE Webhook 傳來的 POST 請求
@@ -15,108 +17,228 @@ function doPost(e) {
 
   const userMessage = event.message.text;
   const replyToken = event.replyToken;
-
-  // 1. 解析訊息內容 (判斷早晚)
-  let period = "早";
-  if (userMessage.match(/(晚|Night|night)/i)) {
-    period = "晚";
-  }
-
-  // 2. 擷取所有數字 (過濾掉文字，只取數值)
-  const nums = userMessage.match(/\d+/g);
-
-  // 如果成功擷取到 6 個以上的數字，代表有兩組完整的 收縮/舒張/脈搏
-  if (nums && nums.length >= 6) {
-    const sys1 = parseInt(nums[0], 10);
-    const dia1 = parseInt(nums[1], 10);
-    const pul1 = parseInt(nums[2], 10);
-    const sys2 = parseInt(nums[3], 10);
-    const dia2 = parseInt(nums[4], 10);
-    const pul2 = parseInt(nums[5], 10);
-
-    // 3. 計算平均值
-    const avgSys = Math.round((sys1 + sys2) / 2);
-    const avgDia = Math.round((dia1 + dia2) / 2);
-    const avgPul = Math.round((pul1 + pul2) / 2);
-
-    // 4. 狀態評估邏輯 (中印雙語)
-    const statusObj = getBpStatus(avgSys, avgDia);
-
-    // 5. 取得當天日期 (格式：M/D)
-    const today = new Date();
-    const twTime = new Date(today.getTime() + (8 * 60 * 60 * 1000));
-    const dateString = (twTime.getUTCMonth() + 1) + '/' + twTime.getUTCDate();
-
-    // 6. 將資料 Append 到指定的 Google Sheet
-    const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
-    const targetGid = 2143792150;
-
-    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-    const sheet = spreadsheet
-      .getSheets()
-      .find(s => s.getSheetId() === targetGid);
-
-    if (!sheet) {
-      throw new Error('找不到指定的工作表分頁 gid: ' + targetGid);
-    }
-
-    sheet.appendRow([
-      dateString, period,
-      sys1, dia1, pul1,
-      sys2, dia2, pul2,
-      avgSys, avgDia, avgPul,
-      statusObj.zh // 試算表存中文即可
-    ]);
-
-    // 7. 取得最近三天的摘要 (分別取得中印版本)
-    const summaries = getRecentSummary(sheet);
-
-    // 8. 發送雙語訊息 (拆分為兩則獨立訊息)
-    const periodId = (period === "早") ? "Pagi" : "Malam";
-    
-    // 印尼文區塊 (第一則訊息)
-    const idBlock = [
-      `✅ Berhasil dicatat (${periodId})`,
-      `Rata-rata: ${avgSys} / ${avgDia}`,
-      `Status: ${statusObj.id}`,
-      ``,
-      `[Catatan 3 Hari Terakhir]`,
-      summaries.id,
-      ``,
-      `💡 Referensi Status:`,
-      `🔴 Tinggi: >= 135 / 85`,
-      `⚠️ Rendah: Keduanya < 90 / 60`,
-      `⚠️ Sistolik Rendah: Atas < 90`,
-      `⚠️ Diastolik Rendah: Bawah < 60`
-    ].join('\n');
-
-    // 中文區塊 (第二則訊息)
-    const zhBlock = [
-      `✅ 已成功紀錄 (${period})`,
-      `平均：${avgSys} / ${avgDia}`,
-      `狀態：${statusObj.zh}`,
-      ``,
-      `【最近三天紀錄】`,
-      summaries.zh,
-      ``,
-      `💡 判斷參考：`,
-      `🔴 偏高：>= 135 / 85`,
-      `⚠️ 偏低：兩者都低於 90 / 60`,
-      `⚠️ 收縮壓低：上面低於 90`,
-      `⚠️ 舒張壓低：下面低於 60`
-    ].join('\n');
-
-    // 發送兩則訊息
-    replyToLine(replyToken, [idBlock, zhBlock]);
-  } else {
-    // 錯誤提示也拆分發送
+  const entries = parseBpEntries(userMessage);
+  if (!entries.length) {
     replyToLine(replyToken, [
-      "✅ Berhasil dicatat (Pagi)\nFormat salah!\nPerlu 2 set data.",
-      "已成功紀錄 (早)\n格式似乎不對喔！\n請確認是否有兩組完整的數據。"
+      "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙 5/15\n128/65/75 | 123/63/73",
+      "格式不對。\n請提供兩組血壓資料，例如：\n🌙 5/15\n128/65/75 | 123/63/73"
     ]);
+    return ContentService.createTextOutput("Success");
   }
+
+  // 1. 取得 Google Sheet 物件
+  const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
+  const targetGid = 2143792150;
+
+  const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+  const sheet = spreadsheet
+    .getSheets()
+    .find(s => s.getSheetId() === targetGid);
+
+  if (!sheet) {
+    throw new Error('找不到指定的工作表分頁 gid: ' + targetGid);
+  }
+
+  const savedEntries = entries.map(entry => appendEntry(sheet, entry));
+  const latestEntry = savedEntries[savedEntries.length - 1];
+  const summaries = getRecentSummary(sheet);
+
+  const idBlock = buildReplyBlock("id", savedEntries, latestEntry, summaries);
+  const zhBlock = buildReplyBlock("zh", savedEntries, latestEntry, summaries);
+
+  replyToLine(replyToken, [idBlock, zhBlock]);
 
   return ContentService.createTextOutput("Success");
+}
+
+function parseBpEntries(message) {
+  const lines = message
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean);
+
+  const entries = [];
+  let pendingDate = null;
+  let pendingPeriod = detectPeriod(message) || "早";
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const headerInfo = parseHeaderLine(line);
+    if (headerInfo.dateString) pendingDate = headerInfo.dateString;
+    if (headerInfo.period) pendingPeriod = headerInfo.period;
+
+    const bpLine = extractBpLine(line);
+    if (!bpLine) continue;
+
+    entries.push({
+      dateString: pendingDate || getTodayDateString(),
+      period: pendingPeriod || "早",
+      sys1: bpLine.sys1,
+      dia1: bpLine.dia1,
+      pul1: bpLine.pul1,
+      sys2: bpLine.sys2,
+      dia2: bpLine.dia2,
+      pul2: bpLine.pul2
+    });
+  }
+
+  if (entries.length) return entries;
+
+  const fallbackLine = extractBpLine(message);
+  if (!fallbackLine) return [];
+
+  return [{
+    dateString: getTodayDateString(),
+    period: detectPeriod(message) || "早",
+    sys1: fallbackLine.sys1,
+    dia1: fallbackLine.dia1,
+    pul1: fallbackLine.pul1,
+    sys2: fallbackLine.sys2,
+    dia2: fallbackLine.dia2,
+    pul2: fallbackLine.pul2
+  }];
+}
+
+function parseHeaderLine(line) {
+  const dateMatch = line.match(/(?:^|\s)(\d{1,2}\/\d{1,2})(?:\s|$)/);
+  return {
+    dateString: dateMatch ? dateMatch[1] : null,
+    period: detectPeriod(line)
+  };
+}
+
+function detectPeriod(text) {
+  if (/(🌙|晚|malam|night|pm)/i.test(text)) return "晚";
+  if (/(☀️|早|pagi|morning|am)/i.test(text)) return "早";
+  return null;
+}
+
+function extractBpLine(text) {
+  const match = text.match(/(\d{2,3})\s*\/\s*(\d{2,3})\s*\/\s*(\d{2,3})\s*\|\s*(\d{2,3})\s*\/\s*(\d{2,3})\s*\/\s*(\d{2,3})/);
+  if (!match) return null;
+
+  return {
+    sys1: parseInt(match[1], 10),
+    dia1: parseInt(match[2], 10),
+    pul1: parseInt(match[3], 10),
+    sys2: parseInt(match[4], 10),
+    dia2: parseInt(match[5], 10),
+    pul2: parseInt(match[6], 10)
+  };
+}
+
+function getTodayDateString() {
+  const now = new Date();
+  const twTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
+  return (twTime.getUTCMonth() + 1) + '/' + twTime.getUTCDate();
+}
+
+function appendEntry(sheet, entry) {
+  const avgSys = Math.round((entry.sys1 + entry.sys2) / 2);
+  const avgDia = Math.round((entry.dia1 + entry.dia2) / 2);
+  const avgPul = Math.round((entry.pul1 + entry.pul2) / 2);
+  const statusObj = getBpStatus(avgSys, avgDia);
+  const hasReminder = isDuplicateEntry(sheet, entry);
+
+  sheet.appendRow([
+    entry.dateString, entry.period,
+    entry.sys1, entry.dia1, entry.pul1,
+    entry.sys2, entry.dia2, entry.pul2,
+    avgSys, avgDia, avgPul,
+    statusObj.zh
+  ]);
+
+  return {
+    dateString: entry.dateString,
+    period: entry.period,
+    sys1: entry.sys1,
+    dia1: entry.dia1,
+    pul1: entry.pul1,
+    sys2: entry.sys2,
+    dia2: entry.dia2,
+    pul2: entry.pul2,
+    avgSys: avgSys,
+    avgDia: avgDia,
+    avgPul: avgPul,
+    hasReminder: hasReminder,
+    statusObj: statusObj
+  };
+}
+
+function isDuplicateEntry(sheet, entry) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return false;
+
+  const lastValues = sheet.getRange(lastRow, 1, 1, 8).getValues()[0];
+  let lastDate = lastValues[0];
+  if (lastDate instanceof Date) {
+    lastDate = (lastDate.getMonth() + 1) + '/' + lastDate.getDate();
+  }
+
+  return (
+    lastDate == entry.dateString &&
+    lastValues[1] == entry.period &&
+    lastValues[2] == entry.sys1 &&
+    lastValues[3] == entry.dia1 &&
+    lastValues[4] == entry.pul1 &&
+    lastValues[5] == entry.sys2 &&
+    lastValues[6] == entry.dia2 &&
+    lastValues[7] == entry.pul2
+  );
+}
+
+function buildReplyBlock(lang, savedEntries, latestEntry, summaries) {
+  const isZh = lang === "zh";
+  const periodLabel = latestEntry.period === "早"
+    ? (isZh ? "早" : "Pagi")
+    : (isZh ? "晚" : "Malam");
+  const duplicateWarning = latestEntry.hasReminder
+    ? (isZh
+      ? "\n⚠️ (此筆資料與上一筆完全相同)\n"
+      : "\n⚠️ (Data ini sama dengan sebelumnya / 此資料與上一筆相同)\n")
+    : "";
+  const countLine = savedEntries.length > 1
+    ? (isZh
+      ? `本次共新增 ${savedEntries.length} 筆`
+      : `Total ${savedEntries.length} catatan ditambahkan`)
+    : null;
+  const latestLabel = isZh ? "最新一筆" : "Catatan terbaru";
+  const avgLabel = isZh ? "平均" : "Rata-rata";
+  const statusLabel = isZh ? "狀態" : "Status";
+  const summaryTitle = isZh ? "【最近三天紀錄】" : "[Catatan 3 Hari Terakhir]";
+  const summaryBody = isZh ? summaries.zh : summaries.id;
+  const statusText = isZh ? latestEntry.statusObj.zh : latestEntry.statusObj.id;
+  const intro = isZh
+    ? `✅ 已成功紀錄 (${periodLabel})${duplicateWarning}`
+    : `✅ Berhasil dicatat (${periodLabel})${duplicateWarning}`;
+  const helpLines = isZh
+    ? [
+        `💡 判斷參考：`,
+        `🔴 偏高：>= 135 / 85`,
+        `⚠️ 偏低：兩者都低於 90 / 60`,
+        `⚠️ 收縮壓低：上面低於 90`,
+        `⚠️ 舒張壓低：下面低於 60`
+      ]
+    : [
+        `💡 Referensi Status:`,
+        `🔴 Tinggi: >= 135 / 85`,
+        `⚠️ Rendah: Keduanya < 90 / 60`,
+        `⚠️ Sistolik Rendah: Atas < 90`,
+        `⚠️ Diastolik Rendah: Bawah < 60`
+      ];
+
+  return [
+    intro,
+    countLine,
+    `${latestLabel}: ${latestEntry.dateString} ${periodLabel}`,
+    `${avgLabel}: ${latestEntry.avgSys} / ${latestEntry.avgDia}`,
+    `${statusLabel}: ${statusText}`,
+    ``,
+    summaryTitle,
+    summaryBody,
+    ``,
+    helpLines.join('\n')
+  ].filter(Boolean).join('\n');
 }
 
 /**
@@ -229,4 +351,16 @@ function replyToLine(replyToken, messages) {
     payload: JSON.stringify(payload)
   };
   UrlFetchApp.fetch(url, options);
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    buildReplyBlock,
+    detectPeriod,
+    extractBpLine,
+    getBpStatus,
+    getTodayDateString,
+    parseBpEntries,
+    parseHeaderLine
+  };
 }
