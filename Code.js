@@ -17,14 +17,23 @@ function doPost(e) {
 
   const userMessage = event.message.text;
   const replyToken = event.replyToken;
-  const entries = parseBpEntries(userMessage);
-  if (!entries.length) {
+  const parseResult = parseBpEntries(userMessage);
+  if (!parseResult.entries.length) {
+    if (parseResult.errorCode === 'missing_period_for_backfill') {
+      replyToLine(replyToken, [
+        "Perlu keterangan waktu: tulis Pagi/Malam atau ☀️/🌙 untuk data yang ada tanggal atau data lama.",
+        "請補上時段：有日期的補登資料，請寫早/晚或 ☀️/🌙。"
+      ]);
+      return ContentService.createTextOutput("Success");
+    }
+
     replyToLine(replyToken, [
       "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙 5/15\n128/65/75 | 123/63/73",
       "格式不對。\n請提供兩組血壓資料，例如：\n🌙 5/15\n128/65/75 | 123/63/73"
     ]);
     return ContentService.createTextOutput("Success");
   }
+  const entries = parseResult.entries;
 
   // 1. 取得 Google Sheet 物件
   const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
@@ -59,20 +68,32 @@ function parseBpEntries(message) {
 
   const entries = [];
   let pendingDate = null;
-  let pendingPeriod = detectPeriod(message) || "早";
+  let pendingPeriod = detectPeriod(message);
+  let foundAnyDate = false;
+  let bpLineCount = 0;
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const headerInfo = parseHeaderLine(line);
-    if (headerInfo.dateString) pendingDate = headerInfo.dateString;
-    if (headerInfo.period) pendingPeriod = headerInfo.period;
+    if (headerInfo.dateString) {
+      pendingDate = headerInfo.dateString;
+      foundAnyDate = true;
+    }
+    if (headerInfo.period) {
+      pendingPeriod = headerInfo.period;
+    }
 
     const bpLine = extractBpLine(line);
     if (!bpLine) continue;
+    bpLineCount++;
+
+    if (!pendingPeriod && (pendingDate || foundAnyDate || bpLineCount > 1)) {
+      return { entries: [], errorCode: 'missing_period_for_backfill' };
+    }
 
     entries.push({
       dateString: pendingDate || getTodayDateString(),
-      period: pendingPeriod || "早",
+      period: pendingPeriod || getDefaultPeriod(),
       sys1: bpLine.sys1,
       dia1: bpLine.dia1,
       pul1: bpLine.pul1,
@@ -82,21 +103,25 @@ function parseBpEntries(message) {
     });
   }
 
-  if (entries.length) return entries;
+  if (entries.length) return { entries: entries, errorCode: null };
 
   const fallbackLine = extractBpLine(message);
-  if (!fallbackLine) return [];
+  if (!fallbackLine) return { entries: [], errorCode: 'invalid_format' };
 
-  return [{
+  if (!pendingPeriod && foundAnyDate) {
+    return { entries: [], errorCode: 'missing_period_for_backfill' };
+  }
+
+  return { entries: [{
     dateString: getTodayDateString(),
-    period: detectPeriod(message) || "早",
+    period: detectPeriod(message) || getDefaultPeriod(),
     sys1: fallbackLine.sys1,
     dia1: fallbackLine.dia1,
     pul1: fallbackLine.pul1,
     sys2: fallbackLine.sys2,
     dia2: fallbackLine.dia2,
     pul2: fallbackLine.pul2
-  }];
+  }], errorCode: null };
 }
 
 function parseHeaderLine(line) {
@@ -111,6 +136,11 @@ function detectPeriod(text) {
   if (/(🌙|晚|malam|night|pm)/i.test(text)) return "晚";
   if (/(☀️|早|pagi|morning|am)/i.test(text)) return "早";
   return null;
+}
+
+function getDefaultPeriod(date) {
+  const hour = getTaipeiHour(date);
+  return hour >= 12 ? "晚" : "早";
 }
 
 function extractBpLine(text) {
@@ -128,9 +158,38 @@ function extractBpLine(text) {
 }
 
 function getTodayDateString() {
-  const now = new Date();
-  const twTime = new Date(now.getTime() + (8 * 60 * 60 * 1000));
-  return (twTime.getUTCMonth() + 1) + '/' + twTime.getUTCDate();
+  if (typeof Utilities !== 'undefined') {
+    return Utilities.formatDate(new Date(), 'Asia/Taipei', 'M/d');
+  }
+
+  return formatTaipeiParts(new Date()).dateString;
+}
+
+function getTaipeiHour(date) {
+  if (typeof Utilities !== 'undefined') {
+    return parseInt(Utilities.formatDate(date || new Date(), 'Asia/Taipei', 'H'), 10);
+  }
+
+  return formatTaipeiParts(date || new Date()).hour;
+}
+
+function formatTaipeiParts(date) {
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei',
+    month: 'numeric',
+    day: 'numeric',
+    hour: 'numeric',
+    hour12: false
+  });
+  const parts = formatter.formatToParts(date);
+  const month = parts.find(part => part.type === 'month').value;
+  const day = parts.find(part => part.type === 'day').value;
+  const hour = parseInt(parts.find(part => part.type === 'hour').value, 10);
+
+  return {
+    dateString: `${month}/${day}`,
+    hour: hour
+  };
 }
 
 function appendEntry(sheet, entry) {
@@ -359,6 +418,8 @@ if (typeof module !== 'undefined' && module.exports) {
     detectPeriod,
     extractBpLine,
     getBpStatus,
+    getDefaultPeriod,
+    getTaipeiHour,
     getTodayDateString,
     parseBpEntries,
     parseHeaderLine

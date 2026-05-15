@@ -3,7 +3,9 @@ const {
   buildReplyBlock,
   detectPeriod,
   extractBpLine,
+  getDefaultPeriod,
   getBpStatus,
+  getTaipeiHour,
   parseBpEntries,
   parseHeaderLine
 } = require('./Code.js');
@@ -23,6 +25,13 @@ runTest('detectPeriod handles emoji and Indonesian labels', () => {
   assert.strictEqual(detectPeriod('🌙 5/13'), '晚');
   assert.strictEqual(detectPeriod('Pagi 5/13'), '早');
   assert.strictEqual(detectPeriod('random text'), null);
+});
+
+runTest('Taipei time fallback determines morning vs evening', () => {
+  assert.strictEqual(getTaipeiHour(new Date('2026-05-15T01:30:00Z')), 9);
+  assert.strictEqual(getTaipeiHour(new Date('2026-05-15T12:30:00Z')), 20);
+  assert.strictEqual(getDefaultPeriod(new Date('2026-05-15T01:30:00Z')), '早');
+  assert.strictEqual(getDefaultPeriod(new Date('2026-05-15T12:30:00Z')), '晚');
 });
 
 runTest('parseHeaderLine extracts date and period', () => {
@@ -60,42 +69,47 @@ runTest('parseBpEntries handles multiline multi-day message', () => {
     '128/61/68 | 129/59/71'
   ].join('\n');
 
-  assert.deepStrictEqual(parseBpEntries(sample), [
-    {
-      dateString: '5/13',
-      period: '晚',
-      sys1: 128,
-      dia1: 65,
-      pul1: 75,
-      sys2: 123,
-      dia2: 63,
-      pul2: 73
-    },
-    {
-      dateString: '5/14',
-      period: '晚',
-      sys1: 116,
-      dia1: 60,
-      pul1: 70,
-      sys2: 118,
-      dia2: 57,
-      pul2: 69
-    },
-    {
-      dateString: '5/15',
-      period: '晚',
-      sys1: 128,
-      dia1: 61,
-      pul1: 68,
-      sys2: 129,
-      dia2: 59,
-      pul2: 71
-    }
-  ]);
+  assert.deepStrictEqual(parseBpEntries(sample), {
+    entries: [
+      {
+        dateString: '5/13',
+        period: '晚',
+        sys1: 128,
+        dia1: 65,
+        pul1: 75,
+        sys2: 123,
+        dia2: 63,
+        pul2: 73
+      },
+      {
+        dateString: '5/14',
+        period: '晚',
+        sys1: 116,
+        dia1: 60,
+        pul1: 70,
+        sys2: 118,
+        dia2: 57,
+        pul2: 69
+      },
+      {
+        dateString: '5/15',
+        period: '晚',
+        sys1: 128,
+        dia1: 61,
+        pul1: 68,
+        sys2: 129,
+        dia2: 59,
+        pul2: 71
+      }
+    ],
+    errorCode: null
+  });
 });
 
 runTest('parseBpEntries falls back to today for simple single-line input', () => {
-  const entries = parseBpEntries('Pagi 128/65/75 | 123/63/73');
+  const result = parseBpEntries('Pagi 128/65/75 | 123/63/73');
+  const entries = result.entries;
+  assert.strictEqual(result.errorCode, null);
   assert.strictEqual(entries.length, 1);
   assert.strictEqual(entries[0].period, '早');
   assert.deepStrictEqual(
@@ -110,6 +124,39 @@ runTest('parseBpEntries falls back to today for simple single-line input', () =>
     }
   );
   assert.match(entries[0].dateString, /^\d{1,2}\/\d{1,2}$/);
+});
+
+runTest('parseBpEntries uses Taipei-time fallback only for single immediate entry', () => {
+  const result = parseBpEntries('128/65/75 | 123/63/73');
+  assert.strictEqual(result.errorCode, null);
+  assert.strictEqual(result.entries.length, 1);
+  assert.match(result.entries[0].dateString, /^\d{1,2}\/\d{1,2}$/);
+  assert.ok(['早', '晚'].includes(result.entries[0].period));
+});
+
+runTest('parseBpEntries rejects dated backfill without explicit period', () => {
+  assert.deepStrictEqual(
+    parseBpEntries('5/15\n128/65/75 | 123/63/73'),
+    {
+      entries: [],
+      errorCode: 'missing_period_for_backfill'
+    }
+  );
+});
+
+runTest('parseBpEntries rejects multi-entry message without explicit period', () => {
+  const sample = [
+    '5/13',
+    '128/65/75 | 123/63/73',
+    '',
+    '5/14',
+    '116/60/70 | 118/57/69'
+  ].join('\n');
+
+  assert.deepStrictEqual(parseBpEntries(sample), {
+    entries: [],
+    errorCode: 'missing_period_for_backfill'
+  });
 });
 
 runTest('getBpStatus keeps low diastolic classification', () => {
