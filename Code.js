@@ -39,22 +39,15 @@ function doPost(e) {
     const avgDia = Math.round((dia1 + dia2) / 2);
     const avgPul = Math.round((pul1 + pul2) / 2);
 
-    // 4. 狀態評估邏輯
-    let status = "✅ 正常";
-    if (avgSys < 100 || avgDia < 60) {
-      status = "⚠️ 偏低";
-    } else if (avgSys > 140 || avgDia > 90) {
-      status = "🔴 偏高";
-    }
+    // 4. 狀態評估邏輯 (中印雙語)
+    const statusObj = getBpStatus(avgSys, avgDia);
 
     // 5. 取得當天日期 (格式：M/D)
     const today = new Date();
-    // GAS 預設時區可能需調整，加上 8 小時為台灣時間
     const twTime = new Date(today.getTime() + (8 * 60 * 60 * 1000));
     const dateString = (twTime.getUTCMonth() + 1) + '/' + twTime.getUTCDate();
 
     // 6. 將資料 Append 到指定的 Google Sheet
-    // 請確保這些 ID 和 GID 是正確的
     const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
     const targetGid = 2143792150;
 
@@ -72,17 +65,142 @@ function doPost(e) {
       sys1, dia1, pul1,
       sys2, dia2, pul2,
       avgSys, avgDia, avgPul,
-      status
+      statusObj.zh // 試算表存中文即可
     ]);
 
-    // 7. 回覆 LINE 訊息
-    replyToLine(replyToken, `✅ 已成功紀錄 (${period})\n平均：${avgSys} / ${avgDia}\n狀態：${status}`);
+    // 7. 取得最近三天的摘要 (分別取得中印版本)
+    const summaries = getRecentSummary(sheet);
+
+    // 8. 建構雙語訊息 (分開區塊顯示)
+    const periodId = (period === "早") ? "Pagi" : "Malam";
+    
+    // 中文區塊
+    const zhBlock = [
+      `✅ 已成功紀錄 (${period})`,
+      `平均：${avgSys} / ${avgDia}`,
+      `狀態：${statusObj.zh}`,
+      ``,
+      `【最近三天紀錄】`,
+      summaries.zh,
+      ``,
+      `💡 判斷參考：`,
+      `🔴 偏高：>= 135 / 85`,
+      `⚠️ 偏低：兩者都低於 90 / 60`,
+      `⚠️ 收縮壓低：上面低於 90`,
+      `⚠️ 舒張壓低：下面低於 60`
+    ].join('\n');
+
+    // 印尼文區塊
+    const idBlock = [
+      `✅ Berhasil dicatat (${periodId})`,
+      `Rata-rata: ${avgSys} / ${avgDia}`,
+      `Status: ${statusObj.id}`,
+      ``,
+      `[Catatan 3 Hari Terakhir]`,
+      summaries.id,
+      ``,
+      `💡 Referensi Status:`,
+      `🔴 Tinggi: >= 135 / 85`,
+      `⚠️ Rendah: Keduanya < 90 / 60`,
+      `⚠️ Sistolik Rendah: Atas < 90`,
+      `⚠️ Diastolik Rendah: Bawah < 60`
+    ].join('\n');
+
+    const replyMsg = idBlock + '\n\n' + '--------------------\n\n' + zhBlock;
+
+    replyToLine(replyToken, replyMsg);
   } else {
-    // 數字不夠 6 個的錯誤提示
-    replyToLine(replyToken, "格式似乎不對喔！請確認是否有兩組完整的血壓數據。");
+    replyToLine(replyToken, "✅ Berhasil dicatat (Pagi)\nFormat salah!\nPerlu 2 set data.\n\n--------------------\n\n已成功紀錄 (早)\n格式似乎不對喔！\n請確認是否有兩組完整的數據。");
   }
 
   return ContentService.createTextOutput("Success");
+}
+
+/**
+ * 依照血壓數值評估狀態 (傳回中印雙語)
+ * 判斷標準：
+ * 1. 偏高：收縮壓 >= 135 或 舒張壓 >= 85 (居家血壓標準)
+ * 2. 偏低門檻：收縮壓 < 90 或 舒張壓 < 60
+ * 3. 正常 (偏低點)：未達偏低門檻，但收縮壓 < 110 或 舒張壓 < 70
+ */
+function getBpStatus(sys, dia) {
+  // --- 判斷偏高 ---
+  if (sys >= 135 || dia >= 85) {
+    return { zh: "🔴 偏高", id: "🔴 Tinggi" };
+  }
+  
+  // --- 判斷偏低 (低於 90/60) ---
+  if (sys < 90 || dia < 60) {
+    // 情況 A: 收縮壓與舒張壓「兩者都低於門檻」
+    if (sys < 90 && dia < 60) {
+      return { zh: "⚠️ 偏低", id: "⚠️ Rendah" };
+    }
+    // 情況 B: 只有「收縮壓」(上面的數字) 低於 90
+    if (sys < 90) {
+      return { zh: "⚠️ 收縮壓偏低", id: "⚠️ Sistolik Rendah" };
+    }
+    // 情況 C: 只有「舒張壓」(下面的數字) 低於 60
+    return { zh: "⚠️ 舒張壓偏低", id: "⚠️ Diastolik Rendah" };
+  }
+  
+  // --- 判斷正常但數值稍低 (介於 90~110 或 60~70 之間) ---
+  if (sys < 110 || dia < 70) {
+    return { zh: "✅ 正常 (偏低點)", id: "✅ Normal (Agak rendah)" };
+  }
+  
+  // --- 判斷完全正常 ---
+  return { zh: "✅ 正常", id: "✅ Normal" };
+}
+
+/**
+ * 讀取試算表，取得並格式化最近三天的紀錄 (分別傳回中印版本)
+ */
+function getRecentSummary(sheet) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow <= 1) return { zh: "尚無紀錄", id: "No record" };
+
+  const startRow = Math.max(2, lastRow - 15);
+  const data = sheet.getRange(startRow, 1, (lastRow - startRow + 1), 12).getValues();
+
+  // 取得最近 3 個不重複的日期
+  const uniqueDates = [];
+  for (let i = data.length - 1; i >= 0; i--) {
+    let dateVal = data[i][0];
+    if (dateVal instanceof Date) {
+      dateVal = (dateVal.getMonth() + 1) + '/' + dateVal.getDate();
+    }
+    if (!uniqueDates.includes(dateVal)) {
+      uniqueDates.push(dateVal);
+    }
+    if (uniqueDates.length >= 3) break;
+  }
+
+  // 過濾出符合日期的列
+  const filteredRows = data.filter(row => {
+    let d = row[0];
+    if (d instanceof Date) d = (d.getMonth() + 1) + '/' + d.getDate();
+    return uniqueDates.includes(d);
+  });
+
+  // 格式化中文版
+  const zhSummary = filteredRows.map(row => {
+    let d = row[0];
+    if (d instanceof Date) d = (d.getMonth() + 1) + '/' + d.getDate();
+    const icon = (row[1] === "早") ? "☀️" : "🌙";
+    return `${icon} ${d} ${row[1]}\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${row[11]}`;
+  }).join('\n───\n');
+
+  // 格式化印尼文版
+  const idSummary = filteredRows.map(row => {
+    let d = row[0];
+    if (d instanceof Date) d = (d.getMonth() + 1) + '/' + d.getDate();
+    const pId = (row[1] === "早") ? "Pagi" : "Malam";
+    const icon = (row[1] === "早") ? "☀️" : "🌙";
+    const st = getBpStatus(row[8], row[9]);
+    return `${icon} ${d} ${pId}\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${st.id}`;
+  }).join('\n───\n');
+
+  return { zh: zhSummary, id: idSummary };
 }
 
 /**
