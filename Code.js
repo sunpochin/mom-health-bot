@@ -94,7 +94,7 @@ function replyToLine(replyToken, text) {
   const options = {
     headers: {
       'Content-Type': 'application/json; charset=UTF-8',
-      'Authorization': 'Bearer ' + 'S1g4dEKt6pSTETqnpoFEaAt8cJ3QtJiITJgtuPz3gLuM8Uml4YCF4jIQVQSi2jNIAvApoRpmGT8s1h0X79UZz4YljCJPNH3Xw3j98H+4FalaU6pvA/8RsZfEuwfYzCM7C+J4I+a2PoGcoaq7yXiXcAdB04t89/1O/w1cDnyilFU='
+      'Authorization': 'Bearer ' + LINE_CHANNEL_ACCESS_TOKEN
     },
     method: 'post',
     payload: JSON.stringify(payload)
