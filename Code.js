@@ -92,8 +92,39 @@ sheet.appendRow([
   status
 ]);
 
-    // 7. 回覆 LINE 訊息，讓 Susi 或您知道紀錄成功
-    replyToLine(replyToken, `✅ 已成功紀錄 (${period})\n平均：${avgSys} / ${avgDia}\n狀態：${status}`);
+    // 7. 取得最近三天的紀錄並回覆 LINE
+    const data = sheet.getDataRange().getValues();
+    let historyMsg = "\n\n【最近三天紀錄】";
+    let datesFound = [];
+    let recentRecords = [];
+    
+    // 從最後一行往上找 (包含剛寫入的那行)
+    // 假設第0行是標題，所以 i >= 1
+    for (let i = data.length - 1; i >= 1; i--) {
+      const row = data[i];
+      const rowDate = row[0]; // A欄: 日期
+      
+      if (!datesFound.includes(rowDate)) {
+        if (datesFound.length >= 3) {
+          break; // 已經收集到三個不同日期的紀錄
+        }
+        datesFound.push(rowDate);
+      }
+      
+      const rPeriod = row[1];
+      const rAvgSys = row[8];
+      const rAvgDia = row[9];
+      const rStatus = row[11];
+      recentRecords.unshift(`${rowDate} ${rPeriod} ${rAvgSys}/${rAvgDia} ${rStatus}`);
+    }
+
+    if (recentRecords.length > 0) {
+      historyMsg += "\n" + recentRecords.join("\n");
+    } else {
+      historyMsg = "";
+    }
+
+    replyToLine(replyToken, `✅ 已成功紀錄 (${period})\n本次平均：${avgSys} / ${avgDia}\n狀態：${status}${historyMsg}`);
   } else {
     // 數字不夠 3 個的錯誤提示
     replyToLine(replyToken, "格式似乎不對喔！請確認是否有提供至少一組血壓數據。");
