@@ -71,26 +71,10 @@ function doPost(e) {
     // 7. 取得最近三天的摘要 (分別取得中印版本)
     const summaries = getRecentSummary(sheet);
 
-    // 8. 建構雙語訊息 (分開區塊顯示)
+    // 8. 發送雙語訊息 (拆分為兩則獨立訊息)
     const periodId = (period === "早") ? "Pagi" : "Malam";
     
-    // 中文區塊
-    const zhBlock = [
-      `✅ 已成功紀錄 (${period})`,
-      `平均：${avgSys} / ${avgDia}`,
-      `狀態：${statusObj.zh}`,
-      ``,
-      `【最近三天紀錄】`,
-      summaries.zh,
-      ``,
-      `💡 判斷參考：`,
-      `🔴 偏高：>= 135 / 85`,
-      `⚠️ 偏低：兩者都低於 90 / 60`,
-      `⚠️ 收縮壓低：上面低於 90`,
-      `⚠️ 舒張壓低：下面低於 60`
-    ].join('\n');
-
-    // 印尼文區塊
+    // 印尼文區塊 (第一則訊息)
     const idBlock = [
       `✅ Berhasil dicatat (${periodId})`,
       `Rata-rata: ${avgSys} / ${avgDia}`,
@@ -106,11 +90,30 @@ function doPost(e) {
       `⚠️ Diastolik Rendah: Bawah < 60`
     ].join('\n');
 
-    const replyMsg = idBlock + '\n\n' + '--------------------\n\n' + zhBlock;
+    // 中文區塊 (第二則訊息)
+    const zhBlock = [
+      `✅ 已成功紀錄 (${period})`,
+      `平均：${avgSys} / ${avgDia}`,
+      `狀態：${statusObj.zh}`,
+      ``,
+      `【最近三天紀錄】`,
+      summaries.zh,
+      ``,
+      `💡 判斷參考：`,
+      `🔴 偏高：>= 135 / 85`,
+      `⚠️ 偏低：兩者都低於 90 / 60`,
+      `⚠️ 收縮壓低：上面低於 90`,
+      `⚠️ 舒張壓低：下面低於 60`
+    ].join('\n');
 
-    replyToLine(replyToken, replyMsg);
+    // 發送兩則訊息
+    replyToLine(replyToken, [idBlock, zhBlock]);
   } else {
-    replyToLine(replyToken, "✅ Berhasil dicatat (Pagi)\nFormat salah!\nPerlu 2 set data.\n\n--------------------\n\n已成功紀錄 (早)\n格式似乎不對喔！\n請確認是否有兩組完整的數據。");
+    // 錯誤提示也拆分發送
+    replyToLine(replyToken, [
+      "✅ Berhasil dicatat (Pagi)\nFormat salah!\nPerlu 2 set data.",
+      "已成功紀錄 (早)\n格式似乎不對喔！\n請確認是否有兩組完整的數據。"
+    ]);
   }
 
   return ContentService.createTextOutput("Success");
@@ -204,14 +207,19 @@ function getRecentSummary(sheet) {
 }
 
 /**
- * 發送回覆訊息給 LINE 的函式
+ * 發送回覆訊息給 LINE 的函式 (支援多則訊息)
  */
-function replyToLine(replyToken, text) {
+function replyToLine(replyToken, messages) {
   const url = 'https://api.line.me/v2/bot/message/reply';
+  
+  // 確保傳入的是陣列
+  const messageArray = Array.isArray(messages) ? messages : [messages];
+  
   const payload = {
     replyToken: replyToken,
-    messages: [{ type: 'text', text: text }]
+    messages: messageArray.map(msg => ({ type: 'text', text: msg }))
   };
+  
   const options = {
     headers: {
       'Content-Type': 'application/json; charset=UTF-8',
