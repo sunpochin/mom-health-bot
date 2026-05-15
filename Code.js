@@ -72,27 +72,28 @@ function doPost(e) {
     const dateString = (twTime.getUTCMonth() + 1) + '/' + twTime.getUTCDate();
 
     // 6. 將資料 Append 到媽媽血壓的 Google Sheet 最後一行
-const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
-const targetGid = 2143792150;
+    const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
+    const targetGid = 2143792150;
 
-const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
-const sheet = spreadsheet
-  .getSheets()
-  .find(s => s.getSheetId() === targetGid);
+    const spreadsheet = SpreadsheetApp.openById(spreadsheetId);
+    const sheet = spreadsheet
+      .getSheets()
+      .find(s => s.getSheetId() === targetGid);
 
-if (!sheet) {
-  throw new Error('找不到指定的工作表分頁 gid: ' + targetGid);
-}
+    if (!sheet) {
+      throw new Error('找不到指定的工作表分頁 gid: ' + targetGid);
+    }
 
-sheet.appendRow([
-  dateString, period,
-  sys1, dia1, pul1,
-  sys2, dia2, pul2,
-  avgSys, avgDia, avgPul,
-  status
-]);
+    sheet.appendRow([
+      dateString, period,
+      sys1, dia1, pul1,
+      sys2, dia2, pul2,
+      avgSys, avgDia, avgPul,
+      status
+    ]);
 
     // 7. 取得最近三天的紀錄並回覆 LINE
+    // Google Sheets 的 getDateRange().getValues() 取得的日期可能是 Date 物件
     const data = sheet.getDataRange().getValues();
     let historyMsg = "\n\n【最近三天紀錄】";
     let datesFound = [];
@@ -102,7 +103,14 @@ sheet.appendRow([
     // 假設第0行是標題，所以 i >= 1
     for (let i = data.length - 1; i >= 1; i--) {
       const row = data[i];
-      const rowDate = row[0]; // A欄: 日期
+      let rowDate = row[0]; // A欄: 日期
+      
+      // 如果 Google Sheet 讀出來的是 Date 物件，將其轉為字串比較
+      if (rowDate instanceof Date) {
+        rowDate = (rowDate.getMonth() + 1) + '/' + rowDate.getDate();
+      } else {
+        rowDate = String(rowDate); // 確保轉為字串
+      }
       
       if (!datesFound.includes(rowDate)) {
         if (datesFound.length >= 3) {
@@ -124,7 +132,8 @@ sheet.appendRow([
       historyMsg = "";
     }
 
-    replyToLine(replyToken, `✅ 已成功紀錄 (${period})\n本次平均：${avgSys} / ${avgDia}\n狀態：${status}${historyMsg}`);
+    const firstLine = `收到了！這筆血壓是 ${avgSys} / ${avgDia}`;
+    replyToLine(replyToken, `${firstLine}\n✅ 已成功紀錄 (${period})\n狀態：${status}${historyMsg}`);
   } else {
     // 數字不夠 3 個的錯誤提示
     replyToLine(replyToken, "格式似乎不對喔！請確認是否有提供至少一組血壓數據。");
