@@ -20,25 +20,19 @@ function doPost(e) {
   const userMessage = event.message.text;
   const replyToken = event.replyToken;
   
-  // 解析訊息，提取出一筆或多筆血壓資料
-  const parseResult = parseBpEntries(userMessage);
+  // 1. 從文字中提取兩組完整的血壓與脈搏數值 (Susi 當下登錄的格式)
+  const bpLine = extractBpLine(userMessage);
   
-  // 若格式不符或缺少必要資訊，發送相對應的印尼文錯誤提示
-  if (!parseResult.entries.length) {
-    // 情況：補登歷史資料卻忘記註明早/晚時段
-    if (parseResult.errorCode === 'missing_period_for_backfill') {
-      replyToLine(replyToken, "Perlu keterangan waktu: tulis Pagi/Malam atau ☀️/🌙 untuk data yang ada tanggal atau data lama.");
-      return ContentService.createTextOutput("Success");
-    }
-
-    // 情況：一般的格式錯誤提示
-    replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙 5/15\n128/65/75 | 123/63/73");
+  // 若格式不符 (數字不足或格式不對)，直接發送印尼文格式錯誤提示
+  if (!bpLine) {
+    replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙\n128/65/75 | 123/63/73");
     return ContentService.createTextOutput("Success");
   }
-  
-  const entries = parseResult.entries;
 
-  // 1. 取得 Google Sheet 試算表物件
+  // 2. 確定時段 (若訊息有註明以訊息為準，否則自動依台北當下時間判定)
+  const period = detectPeriod(userMessage) || getDefaultPeriod();
+
+  // 3. 取得 Google Sheet 試算表物件
   const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
   const targetGid = 2143792150;
 
@@ -51,108 +45,19 @@ function doPost(e) {
     throw new Error('找不到指定的工作表分頁 gid: ' + targetGid);
   }
 
-  // 2. 逐筆寫入試算表
-  const savedEntries = entries.map(entry => appendEntry(sheet, entry));
-  const latestEntry = savedEntries[savedEntries.length - 1]; // 取得最新寫入的那一筆
+  // 4. 將資料寫入試算表
+  const latestEntry = appendEntry(sheet, bpLine, period);
   
-  // 3. 讀取最新 4 筆歷史紀錄
+  // 5. 讀取最近四筆的歷史紀錄摘要
   const summaries = getRecentSummary(sheet);
 
-  // 4. 建構印尼文的回覆訊息 (本系統只發送一條訊息給 Susi 閱讀)
-  const idBlock = buildReplyBlock("id", savedEntries, latestEntry, summaries);
+  // 6. 建構印尼文的回覆訊息 (本系統只發送一條訊息給 Susi 閱讀)
+  const idBlock = buildReplyBlock("id", latestEntry, summaries);
 
-  // 5. 將訊息回傳給 LINE
+  // 7. 將訊息回傳給 LINE
   replyToLine(replyToken, idBlock);
 
   return ContentService.createTextOutput("Success");
-}
-
-/**
- * 解析使用者輸入的多行或單行訊息，抽離出日期、時段與兩組血壓數據
- * @param {string} message - 使用者傳入的完整文字訊息
- * @return {Object} 包含解析後的 entries 陣列與 errorCode 錯誤代碼
- */
-function parseBpEntries(message) {
-  const lines = message
-    .split(/\r?\n/)
-    .map(line => line.trim())
-    .filter(Boolean);
-
-  const entries = [];
-  let pendingDate = null;
-  let pendingPeriod = detectPeriod(message);
-  let foundAnyDate = false;
-  let bpLineCount = 0;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    
-    // 解析該行是否為標頭 (例如 "🌙 5/15")
-    const headerInfo = parseHeaderLine(line);
-    if (headerInfo.dateString) {
-      pendingDate = headerInfo.dateString;
-      foundAnyDate = true;
-    }
-    if (headerInfo.period) {
-      pendingPeriod = headerInfo.period;
-    }
-
-    // 解析該行是否為血壓數據行 (例如 "128/65/75 | 123/63/73")
-    const bpLine = extractBpLine(line);
-    if (!bpLine) continue;
-    bpLineCount++;
-
-    // 歷史補登防呆：如果補登多筆或有指定日期，但卻沒有指定早/晚時段，判定為缺少時段
-    if (!pendingPeriod && (pendingDate || foundAnyDate || bpLineCount > 1)) {
-      return { entries: [], errorCode: 'missing_period_for_backfill' };
-    }
-
-    entries.push({
-      dateString: pendingDate || getTodayDateString(),
-      period: pendingPeriod || getDefaultPeriod(),
-      sys1: bpLine.sys1,
-      dia1: bpLine.dia1,
-      pul1: bpLine.pul1,
-      sys2: bpLine.sys2,
-      dia2: bpLine.dia2,
-      pul2: bpLine.pul2
-    });
-  }
-
-  // 若成功解析出多筆項目，直接回傳
-  if (entries.length) return { entries: entries, errorCode: null };
-
-  // 備用方案：如果使用者只傳送了單行血壓數值 (無換行)
-  const fallbackLine = extractBpLine(message);
-  if (!fallbackLine) return { entries: [], errorCode: 'invalid_format' };
-
-  if (!pendingPeriod && foundAnyDate) {
-    return { entries: [], errorCode: 'missing_period_for_backfill' };
-  }
-
-  return { entries: [{
-    dateString: getTodayDateString(),
-    period: detectPeriod(message) || getDefaultPeriod(),
-    sys1: fallbackLine.sys1,
-    dia1: fallbackLine.dia1,
-    pul1: fallbackLine.pul1,
-    sys2: fallbackLine.sys2,
-    dia2: fallbackLine.dia2,
-    pul2: fallbackLine.pul2
-  }], errorCode: null };
-}
-
-/**
- * 解析單行文字，抽離出日期與時段標頭
- * @param {string} line - 單行文字
- * @return {Object} 包含 dateString (M/D 格式) 與 period (早/晚)
- */
-function parseHeaderLine(line) {
-  const dateMatch = line.match(/(?:^|\s)(\d{1,2}\/\d{1,2})(?:\s|$)/);
-  return {
-    dateString: dateMatch ? dateMatch[1] : null,
-    period: detectPeriod(line)
-  };
 }
 
 /**
@@ -161,18 +66,17 @@ function parseHeaderLine(line) {
  * @return {string|null} 回傳 "早"、"晚" 或 null
  */
 function detectPeriod(text) {
-  if (/(🌙|晚|malam|night|pm)/i.test(text)) return "晚";
-  if (/(☀️|早|pagi|morning|am)/i.test(text)) return "早";
+  if (/(🌙|晚|malam|night|\bpm\b)/i.test(text)) return "晚";
+  if (/(☀️|早|pagi|morning|\bam\b)/i.test(text)) return "早";
   return null;
 }
 
 /**
  * 根據時間獲取預設的時段 (依據台北時間小時判定)
- * @param {Date} [date] - 基準時間，未傳入則預設為當前台北時間
  * @return {string} 回傳 "早" 或 "晚"
  */
-function getDefaultPeriod(date) {
-  const timeStr = getTaipeiTimeString(date);
+function getDefaultPeriod() {
+  const timeStr = getTaipeiTimeString();
   const hour = parseInt(timeStr.split(':')[0], 10);
   return hour >= 12 ? "晚" : "早";
 }
@@ -205,44 +109,15 @@ function getTodayDateString() {
     return Utilities.formatDate(new Date(), 'Asia/Taipei', 'M/d');
   }
 
-  return formatTaipeiParts(new Date()).dateString;
-}
-
-/**
- * 獲取台北時間的小時數 (24 小時制)
- * @param {Date} [date] - 基準時間，預設為當前時間
- * @return {number} 小時數
- */
-function getTaipeiHour(date) {
-  if (typeof Utilities !== 'undefined') {
-    return parseInt(Utilities.formatDate(date || new Date(), 'Asia/Taipei', 'H'), 10);
-  }
-
-  return formatTaipeiParts(date || new Date()).hour;
-}
-
-/**
- * 本地開發/測試環境的備份時區轉換方案 (當無 Google Utilities 時使用)
- * @param {Date} date - 基準時間
- * @return {Object} 包含 dateString 與 hour
- */
-function formatTaipeiParts(date) {
   const formatter = new Intl.DateTimeFormat('en-US', {
     timeZone: 'Asia/Taipei',
     month: 'numeric',
-    day: 'numeric',
-    hour: 'numeric',
-    hour12: false
+    day: 'numeric'
   });
-  const parts = formatter.formatToParts(date);
+  const parts = formatter.formatToParts(new Date());
   const month = parts.find(part => part.type === 'month').value;
   const day = parts.find(part => part.type === 'day').value;
-  const hour = parseInt(parts.find(part => part.type === 'hour').value, 10);
-
-  return {
-    dateString: `${month}/${day}`,
-    hour: hour
-  };
+  return `${month}/${day}`;
 }
 
 /**
@@ -269,46 +144,39 @@ function getTaipeiTimeString(date) {
 /**
  * 將單筆血壓紀錄寫入試算表，並補全當下時間戳記
  * @param {Sheet} sheet - Google Sheet 工作表物件
- * @param {Object} entry - 解析後的單筆資料物件
+ * @param {Object} bpLine - 解析後的血壓數值物件
+ * @param {string} period - 判定後的早/晚時段
  * @return {Object} 寫入成功且已更新時間欄位的資料物件
  */
-function appendEntry(sheet, entry) {
-  const avgSys = Math.round((entry.sys1 + entry.sys2) / 2);
-  const avgDia = Math.round((entry.dia1 + entry.dia2) / 2);
-  const avgPul = Math.round((entry.pul1 + entry.pul2) / 2);
+function appendEntry(sheet, bpLine, period) {
+  const avgSys = Math.round((bpLine.sys1 + bpLine.sys2) / 2);
+  const avgDia = Math.round((bpLine.dia1 + bpLine.dia2) / 2);
+  const avgPul = Math.round((bpLine.pul1 + bpLine.pul2) / 2);
   
-  // 補全時間戳記：若為今日量測且原資料無時間，補上台北當下時間
-  let dateToSave = entry.dateString;
-  if (!dateToSave.includes(' ') && !dateToSave.includes(':')) {
-    const todayString = getTodayDateString();
-    if (dateToSave === todayString) {
-      dateToSave = `${dateToSave} ${getTaipeiTimeString()}`;
-    }
-  }
-  
-  entry.dateString = dateToSave;
+  // 當下量測，日期自動補上台北當下時間 (例如 "6/29 16:34")
+  const dateToSave = `${getTodayDateString()} ${getTaipeiTimeString()}`;
   
   const statusObj = getBpStatus(avgSys, avgDia);
-  const hasReminder = isDuplicateEntry(sheet, entry);
+  const hasReminder = isDuplicateEntry(sheet, bpLine, period, dateToSave);
 
   // 寫入 Google Sheet 試算表
   sheet.appendRow([
-    dateToSave, entry.period,
-    entry.sys1, entry.dia1, entry.pul1,
-    entry.sys2, entry.dia2, entry.pul2,
+    dateToSave, period,
+    bpLine.sys1, bpLine.dia1, bpLine.pul1,
+    bpLine.sys2, bpLine.dia2, bpLine.pul2,
     avgSys, avgDia, avgPul,
     statusObj.zh
   ]);
 
   return {
     dateString: dateToSave,
-    period: entry.period,
-    sys1: entry.sys1,
-    dia1: entry.dia1,
-    pul1: entry.pul1,
-    sys2: entry.sys2,
-    dia2: entry.dia2,
-    pul2: entry.pul2,
+    period: period,
+    sys1: bpLine.sys1,
+    dia1: bpLine.dia1,
+    pul1: bpLine.pul1,
+    sys2: bpLine.sys2,
+    dia2: bpLine.dia2,
+    pul2: bpLine.pul2,
     avgSys: avgSys,
     avgDia: avgDia,
     avgPul: avgPul,
@@ -320,10 +188,12 @@ function appendEntry(sheet, entry) {
 /**
  * 比對試算表最後一筆紀錄，判斷是否與當次輸入完全重複
  * @param {Sheet} sheet - Google Sheet 工作表物件
- * @param {Object} entry - 當前準備寫入的資料物件
+ * @param {Object} bpLine - 當前準備寫入的血壓數值物件
+ * @param {string} period - 當次時段
+ * @param {string} dateToSave - 當次要寫入的日期時間字串
  * @return {boolean} 是否完全重複
  */
-function isDuplicateEntry(sheet, entry) {
+function isDuplicateEntry(sheet, bpLine, period, dateToSave) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return false;
 
@@ -332,29 +202,28 @@ function isDuplicateEntry(sheet, entry) {
   let lastDate = lastValues[0];
   lastDate = lastDate.split(' ')[0]; // 只提取日期部分，例如 "6/29"
 
-  const entryDateOnly = entry.dateString.split(' ')[0];
+  const entryDateOnly = dateToSave.split(' ')[0];
 
   return (
     lastDate == entryDateOnly &&
-    lastValues[1] == entry.period &&
-    lastValues[2] == entry.sys1 &&
-    lastValues[3] == entry.dia1 &&
-    lastValues[4] == entry.pul1 &&
-    lastValues[5] == entry.sys2 &&
-    lastValues[6] == entry.dia2 &&
-    lastValues[7] == entry.pul2
+    lastValues[1] == period &&
+    lastValues[2] == bpLine.sys1 &&
+    lastValues[3] == bpLine.dia1 &&
+    lastValues[4] == bpLine.pul1 &&
+    lastValues[5] == bpLine.sys2 &&
+    lastValues[6] == bpLine.dia2 &&
+    lastValues[7] == bpLine.pul2
   );
 }
 
 /**
  * 依據指定語言 (中/印)，動態建置回覆給 LINE 的訊息字串
  * @param {string} lang - 語言代碼，"id" 或 "zh"
- * @param {Array} savedEntries - 本次新增的紀錄陣列
  * @param {Object} latestEntry - 最新一筆紀錄
  * @param {Object} summaries - 最近四筆歷史紀錄的格式化結果
  * @return {string} 完整的訊息內容
  */
-function buildReplyBlock(lang, savedEntries, latestEntry, summaries) {
+function buildReplyBlock(lang, latestEntry, summaries) {
   const isZh = lang === "zh";
   const periodLabel = latestEntry.period === "早"
     ? (isZh ? "早" : "Pagi")
@@ -503,22 +372,6 @@ function getBpStatus(sys, dia) {
 }
 
 /**
- * 安全解析並格式化試算表中的日期與時間 (傳回 M/D HH:mm 格式字串)
- * @param {Date|string} val - 日期物件或字串
- * @return {string} 格式化後的時間字串
- */
-function formatDateTime(val) {
-  if (val instanceof Date) {
-    const m = val.getMonth() + 1;
-    const d = val.getDate();
-    const h = String(val.getHours()).padStart(2, '0');
-    const min = String(val.getMinutes()).padStart(2, '0');
-    return `${m}/${d} ${h}:${min}`;
-  }
-  return String(val); // 如果已經是字串，直接回傳
-}
-
-/**
  * 讀取試算表，取得並格式化最近四筆的紀錄 (分別傳回中印版本)
  * @param {Sheet} sheet - Google Sheet 工作表物件
  * @return {Object} 包含 zh 與 id 格式化歷史紀錄的物件
@@ -534,18 +387,16 @@ function getRecentSummary(sheet) {
 
   // 格式化中文版 (顯示包含時間戳記的日期，直接顯示平均收縮壓/平均舒張壓/平均脈搏)
   const zhSummary = data.map(row => {
-    const d = formatDateTime(row[0]);
     const icon = (row[1] === "早") ? "☀️" : "🌙";
-    return `${icon} ${d} (${row[1]})\n   平均：${row[8]} / ${row[9]} / ${row[10]}\n   ${row[11]}`;
+    return `${icon} ${row[0]} (${row[1]})\n   平均：${row[8]} / ${row[9]} / ${row[10]}\n   ${row[11]}`;
   }).join('\n───\n');
 
   // 格式化印尼文版 (顯示包含時間戳記的日期，直接顯示平均收縮壓/平均舒張壓/平均脈搏)
   const idSummary = data.map(row => {
-    const d = formatDateTime(row[0]);
     const pId = (row[1] === "早") ? "Pagi" : "Malam";
     const icon = (row[1] === "早") ? "☀️" : "🌙";
     const st = getBpStatus(parseInt(row[8], 10), parseInt(row[9], 10));
-    return `${icon} ${d} (${pId})\n   Rata-rata: ${row[8]} / ${row[9]} / ${row[10]}\n   ${st.id}`;
+    return `${icon} ${row[0]} (${pId})\n   Rata-rata: ${row[8]} / ${row[9]} / ${row[10]}\n   ${st.id}`;
   }).join('\n───\n');
 
   return { zh: zhSummary, id: idSummary };
@@ -585,9 +436,7 @@ if (typeof module !== 'undefined' && module.exports) {
     extractBpLine,
     getBpStatus,
     getDefaultPeriod,
-    getTaipeiHour,
     getTodayDateString,
-    parseBpEntries,
-    parseHeaderLine
+    replyToLine
   };
 }
