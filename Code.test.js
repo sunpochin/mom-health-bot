@@ -159,10 +159,10 @@ runTest('parseBpEntries rejects multi-entry message without explicit period', ()
   });
 });
 
-runTest('getBpStatus keeps low diastolic classification', () => {
+runTest('getBpStatus classifies mild low diastolic as normal (diastolic slightly low)', () => {
   assert.deepStrictEqual(getBpStatus(117, 59), {
-    zh: '⚠️ 舒張壓偏低',
-    id: '⚠️ Diastolik Rendah'
+    zh: '✅ 正常 (舒張壓偏低點)',
+    id: '✅ Normal (Diastolik agak rendah)'
   });
 });
 
