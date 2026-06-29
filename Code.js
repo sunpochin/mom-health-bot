@@ -20,17 +20,11 @@ function doPost(e) {
   const parseResult = parseBpEntries(userMessage);
   if (!parseResult.entries.length) {
     if (parseResult.errorCode === 'missing_period_for_backfill') {
-      replyToLine(replyToken, [
-        "Perlu keterangan waktu: tulis Pagi/Malam atau ☀️/🌙 untuk data yang ada tanggal atau data lama.",
-        "請補上時段：有日期的補登資料，請寫早/晚或 ☀️/🌙。"
-      ]);
+      replyToLine(replyToken, "Perlu keterangan waktu: tulis Pagi/Malam atau ☀️/🌙 untuk data yang ada tanggal atau data lama.");
       return ContentService.createTextOutput("Success");
     }
 
-    replyToLine(replyToken, [
-      "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙 5/15\n128/65/75 | 123/63/73",
-      "格式不對。\n請提供兩組血壓資料，例如：\n🌙 5/15\n128/65/75 | 123/63/73"
-    ]);
+    replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙 5/15\n128/65/75 | 123/63/73");
     return ContentService.createTextOutput("Success");
   }
   const entries = parseResult.entries;
@@ -53,9 +47,9 @@ function doPost(e) {
   const summaries = getRecentSummary(sheet);
 
   const idBlock = buildReplyBlock("id", savedEntries, latestEntry, summaries);
-  const zhBlock = buildReplyBlock("zh", savedEntries, latestEntry, summaries);
 
-  replyToLine(replyToken, [idBlock, zhBlock]);
+  // 僅回傳印尼文的單條訊息
+  replyToLine(replyToken, idBlock);
 
   return ContentService.createTextOutput("Success");
 }
@@ -139,7 +133,8 @@ function detectPeriod(text) {
 }
 
 function getDefaultPeriod(date) {
-  const hour = getTaipeiHour(date);
+  const timeStr = getTaipeiTimeString(date);
+  const hour = parseInt(timeStr.split(':')[0], 10);
   return hour >= 12 ? "晚" : "早";
 }
 
@@ -192,15 +187,43 @@ function formatTaipeiParts(date) {
   };
 }
 
+function getTaipeiTimeString(date) {
+  if (typeof Utilities !== 'undefined') {
+    return Utilities.formatDate(date || new Date(), 'Asia/Taipei', 'HH:mm');
+  }
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Taipei',
+    hour: 'numeric',
+    minute: 'numeric',
+    hour12: false
+  });
+  const parts = formatter.formatToParts(date || new Date());
+  const hour = parts.find(part => part.type === 'hour').value.padStart(2, '0');
+  const minute = parts.find(part => part.type === 'minute').value.padStart(2, '0');
+  return `${hour}:${minute}`;
+}
+
 function appendEntry(sheet, entry) {
   const avgSys = Math.round((entry.sys1 + entry.sys2) / 2);
   const avgDia = Math.round((entry.dia1 + entry.dia2) / 2);
   const avgPul = Math.round((entry.pul1 + entry.pul2) / 2);
+  
+  // 確保寫入日期包含當前時間戳記 (如果原本沒有包含時間且是今日登載)
+  let dateToSave = entry.dateString;
+  if (!dateToSave.includes(' ') && !dateToSave.includes(':')) {
+    const todayString = getTodayDateString();
+    if (dateToSave === todayString) {
+      dateToSave = `${dateToSave} ${getTaipeiTimeString()}`;
+    }
+  }
+  
+  entry.dateString = dateToSave;
+  
   const statusObj = getBpStatus(avgSys, avgDia);
   const hasReminder = isDuplicateEntry(sheet, entry);
 
   sheet.appendRow([
-    entry.dateString, entry.period,
+    dateToSave, entry.period,
     entry.sys1, entry.dia1, entry.pul1,
     entry.sys2, entry.dia2, entry.pul2,
     avgSys, avgDia, avgPul,
@@ -208,7 +231,7 @@ function appendEntry(sheet, entry) {
   ]);
 
   return {
-    dateString: entry.dateString,
+    dateString: dateToSave,
     period: entry.period,
     sys1: entry.sys1,
     dia1: entry.dia1,
@@ -228,14 +251,15 @@ function isDuplicateEntry(sheet, entry) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return false;
 
-  const lastValues = sheet.getRange(lastRow, 1, 1, 8).getValues()[0];
+  // 使用 getDisplayValues() 避免 Date 物件轉換時區產生的偏差
+  const lastValues = sheet.getRange(lastRow, 1, 1, 8).getDisplayValues()[0];
   let lastDate = lastValues[0];
-  if (lastDate instanceof Date) {
-    lastDate = (lastDate.getMonth() + 1) + '/' + lastDate.getDate();
-  }
+  lastDate = lastDate.split(' ')[0]; // 取出日期部分，例如 "6/29"
+
+  const entryDateOnly = entry.dateString.split(' ')[0];
 
   return (
-    lastDate == entry.dateString &&
+    lastDate == entryDateOnly &&
     lastValues[1] == entry.period &&
     lastValues[2] == entry.sys1 &&
     lastValues[3] == entry.dia1 &&
@@ -264,26 +288,42 @@ function buildReplyBlock(lang, savedEntries, latestEntry, summaries) {
   const latestLabel = isZh ? "最新一筆" : "Catatan terbaru";
   const avgLabel = isZh ? "平均" : "Rata-rata";
   const statusLabel = isZh ? "狀態" : "Status";
-  const summaryTitle = isZh ? "【最近三天紀錄】" : "[Catatan 3 Hari Terakhir]";
+  const summaryTitle = isZh ? "【最近四筆紀錄】" : "[4 Catatan Terakhir]";
   const summaryBody = isZh ? summaries.zh : summaries.id;
   const statusText = isZh ? latestEntry.statusObj.zh : latestEntry.statusObj.id;
+
+  // 嘗試從 latestEntry.dateString 中解析出時間戳記
+  const timeMatch = latestEntry.dateString.match(/\s(\d{2}:\d{2})/);
+  const timeSuffix = timeMatch ? ` - ${timeMatch[1]}` : "";
+
   const intro = isZh
-    ? `✅ 已成功紀錄 (${periodLabel})${duplicateWarning}`
-    : `✅ Berhasil dicatat (${periodLabel})${duplicateWarning}`;
+    ? `✅ 已成功紀錄 (${periodLabel}${timeSuffix})${duplicateWarning}`
+    : `✅ Berhasil dicatat (${periodLabel}${timeSuffix})${duplicateWarning}`;
+
   const helpLines = isZh
     ? [
-        `💡 判斷參考：`,
-        `🔴 偏高：>= 135 / 85`,
-        `⚠️ 偏低：兩者都低於 90 / 60`,
-        `⚠️ 收縮壓低：上面低於 90`,
-        `⚠️ 舒張壓低：下面低於 60`
+        `💡 判斷參考 (媽媽專用)：`,
+        `🔴 極高危險：>= 180 / 120 (需立即複測)`,
+        `🔴 明顯偏高：>= 160 / 100`,
+        `⚠️ 偏高：>= 135 / 85`,
+        `🟡 偏高觀察：130-134 或 80-84`,
+        `✅ 正常：110-129 / 60-79`,
+        `✅ 正常 (舒張壓偏低點)：110-129 / 55-59`,
+        `✅ 正常 (偏低點)：100-109 / >= 55`,
+        `⚠️ 偏低：90-99 或 50-54`,
+        `🔴 明顯偏低：< 90 或 < 50`
       ]
     : [
-        `💡 Referensi Status:`,
-        `🔴 Tinggi: >= 135 / 85`,
-        `⚠️ Rendah: Keduanya < 90 / 60`,
-        `⚠️ Sistolik Rendah: Atas < 90`,
-        `⚠️ Diastolik Rendah: Bawah < 60`
+        `💡 Referensi Status (Khusus Ibu):`,
+        `🔴 Bahaya Sangat Tinggi: >= 180 / 120 (ukur ulang segera)`,
+        `🔴 Cukup Tinggi: >= 160 / 100`,
+        `⚠️ Tinggi: >= 135 / 85`,
+        `🟡 Observasi (Agak tinggi): 130-134 atau 80-84`,
+        `✅ Normal: 110-129 / 60-79`,
+        `✅ Normal (Diastolik agak rendah): 110-129 / 55-59`,
+        `✅ Normal (Agak rendah): 100-109 / >= 55`,
+        `⚠️ Rendah: 90-99 atau 50-54`,
+        `🔴 Sangat Rendah: < 90 atau < 50`
       ];
 
   return [
@@ -302,86 +342,128 @@ function buildReplyBlock(lang, savedEntries, latestEntry, summaries) {
 
 /**
  * 依照血壓數值評估狀態 (傳回中印雙語)
- * 判斷標準：
- * 1. 偏高：收縮壓 >= 135 或 舒張壓 >= 85 (居家血壓標準)
- * 2. 偏低門檻：收縮壓 < 90 或 舒張壓 < 60
- * 3. 正常 (偏低點)：未達偏低門檻，但收縮壓 < 110 或 舒張壓 < 70
+ * 針對長輩腦動脈瘤與防跌倒的客製化標準：
+ * 1. 極高危險：SBP >= 180 或 DBP >= 120
+ * 2. 明顯偏高：SBP >= 160 或 DBP >= 100
+ * 3. 偏高：SBP >= 135 或 DBP >= 85
+ * 4. 偏高觀察：SBP 130-134 或 DBP 80-84
+ * 5. 明顯偏低：SBP < 90 或 DBP < 50
+ * 6. 偏低：SBP 90-99 或 DBP 50-54
+ * 7. 正常 (舒張壓偏低點)：SBP 110-129 且 DBP 55-59
+ * 8. 正常 (偏低點)：SBP 100-109 且 DBP >= 55
+ * 9. 正常：SBP 110-129 且 DBP 60-79
  */
 function getBpStatus(sys, dia) {
-  // --- 判斷偏高 ---
+  // 1. 高血壓端 (由高到低判斷)
+  if (sys >= 180 || dia >= 120) {
+    return { 
+      zh: "🔴 極高危險，需立即複測", 
+      id: "🔴 Bahaya Sangat Tinggi, ukur ulang segera" 
+    };
+  }
+  if (sys >= 160 || dia >= 100) {
+    return { 
+      zh: "🔴 明顯偏高", 
+      id: "🔴 Cukup Tinggi" 
+    };
+  }
   if (sys >= 135 || dia >= 85) {
-    return { zh: "🔴 偏高", id: "🔴 Tinggi" };
+    return { 
+      zh: "⚠️ 偏高", 
+      id: "⚠️ Tinggi" 
+    };
+  }
+  if ((sys >= 130 && sys <= 134) || (dia >= 80 && dia <= 84)) {
+    return { 
+      zh: "🟡 偏高觀察", 
+      id: "🟡 Observasi (Agak tinggi)" 
+    };
+  }
+
+  // 2. 低血壓端 (由低到高判斷，此時 sys < 130 且 dia < 80)
+  if (sys < 90 || dia < 50) {
+    return { 
+      zh: "🔴 明顯偏低", 
+      id: "🔴 Sangat Rendah" 
+    };
+  }
+  if ((sys >= 90 && sys <= 99) || (dia >= 50 && dia <= 54)) {
+    return { 
+      zh: "⚠️ 偏低", 
+      id: "⚠️ Rendah" 
+    };
+  }
+
+  // 3. 正常區與細分正常偏低點
+  // 情況 A：收縮壓 110–129 且 舒張壓 55–59 (例如：117 / 58.5)
+  if (sys >= 110 && sys <= 129 && dia >= 55 && dia <= 59) {
+    return {
+      zh: "✅ 正常 (舒張壓偏低點)",
+      id: "✅ Normal (Diastolik agak rendah)"
+    };
+  }
+  // 情況 B：收縮壓 100–109 且 舒張壓 >= 55 (例如：108 / 60)
+  if (sys >= 100 && sys <= 109 && dia >= 55) {
+    return {
+      zh: "✅ 正常 (偏低點)",
+      id: "✅ Normal (Agak rendah)"
+    };
+  }
+  // 情況 C：理想/穩定狀態 SBP 110-129 且 DBP 60-79
+  if (sys >= 110 && sys <= 129 && dia >= 60 && dia <= 79) {
+    return { 
+      zh: "✅ 正常", 
+      id: "✅ Normal" 
+    };
   }
   
-  // --- 判斷偏低 (低於 90/60) ---
-  if (sys < 90 || dia < 60) {
-    // 情況 A: 收縮壓與舒張壓「兩者都低於門檻」
-    if (sys < 90 && dia < 60) {
-      return { zh: "⚠️ 偏低", id: "⚠️ Rendah" };
-    }
-    // 情況 B: 只有「收縮壓」(上面的數字) 低於 90
-    if (sys < 90) {
-      return { zh: "⚠️ 收縮壓偏低", id: "⚠️ Sistolik Rendah" };
-    }
-    // 情況 C: 只有「舒張壓」(下面的數字) 低於 60
-    return { zh: "⚠️ 舒張壓偏低", id: "⚠️ Diastolik Rendah" };
-  }
-  
-  // --- 判斷正常但數值稍低 (介於 90~110 或 60~70 之間) ---
-  if (sys < 110 || dia < 70) {
-    return { zh: "✅ 正常 (偏低點)", id: "✅ Normal (Agak rendah)" };
-  }
-  
-  // --- 判斷完全正常 ---
-  return { zh: "✅ 正常", id: "✅ Normal" };
+  // 預防極端邊界情況的預設回傳值
+  return { 
+    zh: "✅ 正常", 
+    id: "✅ Normal" 
+  };
 }
 
 /**
- * 讀取試算表，取得並格式化最近三天的紀錄 (分別傳回中印版本)
+ * 安全解析並格式化試算表中的日期與時間 (傳回 M/D HH:mm 格式字串)
+ */
+function formatDateTime(val) {
+  if (val instanceof Date) {
+    const m = val.getMonth() + 1;
+    const d = val.getDate();
+    const h = String(val.getHours()).padStart(2, '0');
+    const min = String(val.getMinutes()).padStart(2, '0');
+    return `${m}/${d} ${h}:${min}`;
+  }
+  return String(val); // 如果已經是字串，直接回傳
+}
+
+/**
+ * 讀取試算表，取得並格式化最近四筆的紀錄 (分別傳回中印版本)
  */
 function getRecentSummary(sheet) {
   const lastRow = sheet.getLastRow();
   if (lastRow <= 1) return { zh: "尚無紀錄", id: "No record" };
 
-  const startRow = Math.max(2, lastRow - 15);
-  const data = sheet.getRange(startRow, 1, (lastRow - startRow + 1), 12).getValues();
+  // 直接取得最後 4 筆 (第一列是標題列，因此從 Row 2 開始)
+  // 使用 getDisplayValues() 直接讀取儲存格純文字，完全繞過 Date 物件轉換時的時區偏差
+  const startRow = Math.max(2, lastRow - 3);
+  const data = sheet.getRange(startRow, 1, (lastRow - startRow + 1), 12).getDisplayValues();
 
-  // 取得最近 3 個不重複的日期
-  const uniqueDates = [];
-  for (let i = data.length - 1; i >= 0; i--) {
-    let dateVal = data[i][0];
-    if (dateVal instanceof Date) {
-      dateVal = (dateVal.getMonth() + 1) + '/' + dateVal.getDate();
-    }
-    if (!uniqueDates.includes(dateVal)) {
-      uniqueDates.push(dateVal);
-    }
-    if (uniqueDates.length >= 3) break;
-  }
-
-  // 過濾出符合日期的列
-  const filteredRows = data.filter(row => {
-    let d = row[0];
-    if (d instanceof Date) d = (d.getMonth() + 1) + '/' + d.getDate();
-    return uniqueDates.includes(d);
-  });
-
-  // 格式化中文版
-  const zhSummary = filteredRows.map(row => {
-    let d = row[0];
-    if (d instanceof Date) d = (d.getMonth() + 1) + '/' + d.getDate();
+  // 格式化中文版 (顯示包含時間戳記的日期)
+  const zhSummary = data.map(row => {
+    const d = formatDateTime(row[0]);
     const icon = (row[1] === "早") ? "☀️" : "🌙";
-    return `${icon} ${d} ${row[1]}\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${row[11]}`;
+    return `${icon} ${d} (${row[1]})\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${row[11]}`;
   }).join('\n───\n');
 
-  // 格式化印尼文版
-  const idSummary = filteredRows.map(row => {
-    let d = row[0];
-    if (d instanceof Date) d = (d.getMonth() + 1) + '/' + d.getDate();
+  // 格式化印尼文版 (顯示包含時間戳記的日期)
+  const idSummary = data.map(row => {
+    const d = formatDateTime(row[0]);
     const pId = (row[1] === "早") ? "Pagi" : "Malam";
     const icon = (row[1] === "早") ? "☀️" : "🌙";
-    const st = getBpStatus(row[8], row[9]);
-    return `${icon} ${d} ${pId}\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${st.id}`;
+    const st = getBpStatus(parseInt(row[8], 10), parseInt(row[9], 10));
+    return `${icon} ${d} (${pId})\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${st.id}`;
   }).join('\n───\n');
 
   return { zh: zhSummary, id: idSummary };
