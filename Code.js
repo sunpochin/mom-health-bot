@@ -367,18 +367,8 @@ function buildReplyBlock(lang, savedEntries, latestEntry, summaries) {
       : "\n⚠️ (Data ini sama dengan sebelumnya / 此資料與上一筆相同)\n")
     : "";
     
-  const countLine = savedEntries.length > 1
-    ? (isZh
-      ? `本次共新增 ${savedEntries.length} 筆`
-      : `Total ${savedEntries.length} catatan ditambahkan`)
-    : null;
-    
-  const latestLabel = isZh ? "最新一筆" : "Catatan terbaru";
-  const avgLabel = isZh ? "平均" : "Rata-rata";
-  const statusLabel = isZh ? "狀態" : "Status";
   const summaryTitle = isZh ? "【最近四筆紀錄】" : "[4 Catatan Terakhir]";
   const summaryBody = isZh ? summaries.zh : summaries.id;
-  const statusText = isZh ? latestEntry.statusObj.zh : latestEntry.statusObj.id;
 
   // 從日期中提取時間戳記
   const timeMatch = latestEntry.dateString.match(/\s(\d{2}:\d{2})/);
@@ -417,15 +407,11 @@ function buildReplyBlock(lang, savedEntries, latestEntry, summaries) {
 
   return [
     intro,
-    countLine,
-    `${latestLabel}: ${latestEntry.dateString} ${periodLabel}`,
-    `${avgLabel}: ${latestEntry.avgSys} / ${latestEntry.avgDia}`,
-    `${statusLabel}: ${statusText}`,
+    ``,
+    helpLines.join('\n'),
     ``,
     summaryTitle,
-    summaryBody,
-    ``,
-    helpLines.join('\n')
+    summaryBody
   ].filter(Boolean).join('\n');
 }
 
@@ -546,20 +532,20 @@ function getRecentSummary(sheet) {
   const startRow = Math.max(2, lastRow - 3);
   const data = sheet.getRange(startRow, 1, (lastRow - startRow + 1), 12).getDisplayValues();
 
-  // 格式化中文版 (顯示包含時間戳記的日期)
+  // 格式化中文版 (顯示包含時間戳記的日期，直接顯示平均收縮壓/平均舒張壓/平均脈搏)
   const zhSummary = data.map(row => {
     const d = formatDateTime(row[0]);
     const icon = (row[1] === "早") ? "☀️" : "🌙";
-    return `${icon} ${d} (${row[1]})\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${row[11]}`;
+    return `${icon} ${d} (${row[1]})\n   平均：${row[8]} / ${row[9]} / ${row[10]}\n   ${row[11]}`;
   }).join('\n───\n');
 
-  // 格式化印尼文版 (顯示包含時間戳記的日期)
+  // 格式化印尼文版 (顯示包含時間戳記的日期，直接顯示平均收縮壓/平均舒張壓/平均脈搏)
   const idSummary = data.map(row => {
     const d = formatDateTime(row[0]);
     const pId = (row[1] === "早") ? "Pagi" : "Malam";
     const icon = (row[1] === "早") ? "☀️" : "🌙";
     const st = getBpStatus(parseInt(row[8], 10), parseInt(row[9], 10));
-    return `${icon} ${d} (${pId})\n   ${row[2]}/${row[3]}/${row[4]} | ${row[5]}/${row[6]}/${row[7]}\n   ${st.id}`;
+    return `${icon} ${d} (${pId})\n   Rata-rata: ${row[8]} / ${row[9]} / ${row[10]}\n   ${st.id}`;
   }).join('\n───\n');
 
   return { zh: zhSummary, id: idSummary };
