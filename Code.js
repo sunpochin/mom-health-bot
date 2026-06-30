@@ -23,9 +23,13 @@ function doPost(e) {
   // 1. 從文字中提取兩組完整的血壓與脈搏數值 (Susi 當下登錄的格式)
   const bpLine = extractBpLine(userMessage);
   
-  // 若格式不符 (數字不足或格式不對)，直接發送印尼文格式錯誤提示
+  // 若格式不符 (數字不足或格式不對)
   if (!bpLine) {
-    replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙\n128/65/75 | 123/63/73");
+    // 只有在訊息「看起來像是在輸入血壓」(包含數字與斜線 /) 時，才給予錯誤提示
+    // 若只是一般聊天或日常禮貌用語 (例如 "Terima kasih"、"hi")，則已讀不回，保持群組安靜
+    if (/\d/.test(userMessage) && /\//.test(userMessage)) {
+      replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙\n128/65/75 | 123/63/73");
+    }
     return ContentService.createTextOutput("Success");
   }
 
