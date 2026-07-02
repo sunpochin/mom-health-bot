@@ -93,6 +93,14 @@
 4.  屬性名稱填入：`LINE_CHANNEL_ACCESS_TOKEN`。
 5.  屬性值填入：您的 LINE Channel Access Token。
 
+**選填：危險血壓與系統告警推播 (`ALERT_LINE_USER_ID`)**
+
+新增指令碼屬性 `ALERT_LINE_USER_ID`，填入兒子本人的 LINE userId。設定後：
+- 血壓判定為 🔴 危險等級（極高危險／明顯偏高／明顯偏低）時，會用 LINE Push API 主動推播一則固定格式的警示訊息（等級＋數值＋時間）給這個 userId，跟 Susi 的對話完全分開，半夜也不會漏看。
+- `writeToSupabase()` 寫入失敗時，同樣會推播一則系統告警（不含原始錯誤細節，只有固定分類文字），完整錯誤仍要看 Apps Script 執行紀錄。
+
+**未設定這個屬性時**：兩種推播都會被安靜略過（只留 `console.warn`），不影響 Susi 這邊正常收到血壓回覆的主流程。取得自己的 userId 的方法：暫時把自己的 LINE 帳號加進 bot 對話，用 `console.log` 印出 `event.source.userId` 後移除，或參考 `bahasa-tw-bot` 用 `wrangler tail` 類似的 log 排查方式（GAS 這邊改看「執行項目」的 log）。
+
 ### 🚀 2. 更新部署 (不變更 Webhook URL)
 若每次都選「新部署」會產生不同的 URL，需要去 LINE 後台重新設定。請使用以下步驟固定 URL：
 1.  點擊右上角 **部署 (Deploy)** > **管理部署 (Manage deployments)**。

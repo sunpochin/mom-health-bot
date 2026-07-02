@@ -1,4 +1,5 @@
 const assert = require('assert');
+const Code = require('./Code.js');
 const {
   buildReplyBlock,
   detectPeriod,
@@ -7,8 +8,40 @@ const {
   getBpStatus,
   getTaipeiHour,
   parseBpEntries,
-  parseHeaderLine
-} = require('./Code.js');
+  parseHeaderLine,
+  pushToLine,
+  sendDangerAlertToFamily,
+  sendOpsAlert,
+  writeToSupabase
+} = Code;
+
+// Minimal Apps Script global mocks, only for the push/Supabase tests below.
+// Code.js calls PropertiesService/UrlFetchApp directly (no `typeof` guard
+// inside these functions), so they must exist as globals before calling in.
+function withGasGlobals(props, fetchResponses, testFn) {
+  const calls = [];
+  global.PropertiesService = {
+    getScriptProperties: () => ({
+      getProperty: (key) => (Object.prototype.hasOwnProperty.call(props, key) ? props[key] : null)
+    })
+  };
+  global.UrlFetchApp = {
+    fetch: (url, options) => {
+      calls.push({ url, options });
+      const res = fetchResponses.shift() || { code: 200, body: '' };
+      return {
+        getResponseCode: () => res.code,
+        getContentText: () => res.body
+      };
+    }
+  };
+  try {
+    testFn(calls);
+  } finally {
+    delete global.PropertiesService;
+    delete global.UrlFetchApp;
+  }
+}
 
 function runTest(name, fn) {
   try {
@@ -193,4 +226,96 @@ runTest('buildReplyBlock shows inserted count for batch messages', () => {
   assert.match(reply, /本次共新增 2 筆/);
   assert.match(reply, /最新一筆: 5\/15 晚/);
   assert.match(reply, /狀態: ⚠️ 舒張壓偏低/);
+});
+
+// P0.2 — 危險等級血壓推播給家屬
+
+runTest('sendDangerAlertToFamily pushes a fixed-format message on a danger level', () => {
+  withGasGlobals({ ALERT_LINE_USER_ID: 'U_SON' }, [{ code: 200 }], (calls) => {
+    sendDangerAlertToFamily({
+      statusObj: { zh: '🔴 明顯偏高', id: '🔴 Cukup Tinggi' },
+      avgSys: 165, avgDia: 102, avgPul: 80,
+      dateString: '7/2 03:15'
+    });
+
+    assert.strictEqual(calls.length, 1);
+    const payload = JSON.parse(calls[0].options.payload);
+    assert.strictEqual(payload.to, 'U_SON');
+    assert.match(payload.messages[0].text, /🔴 明顯偏高/);
+    assert.match(payload.messages[0].text, /165 \/ 102 \/ 80/);
+    assert.match(payload.messages[0].text, /7\/2 03:15/);
+  });
+});
+
+runTest('sendDangerAlertToFamily does not push for non-danger levels', () => {
+  withGasGlobals({ ALERT_LINE_USER_ID: 'U_SON' }, [], (calls) => {
+    sendDangerAlertToFamily({
+      statusObj: { zh: '⚠️ 偏高', id: '⚠️ Tinggi' },
+      avgSys: 140, avgDia: 88, avgPul: 75,
+      dateString: '7/2 08:00'
+    });
+    assert.strictEqual(calls.length, 0);
+  });
+});
+
+runTest('sendDangerAlertToFamily silently skips when ALERT_LINE_USER_ID is unset', () => {
+  withGasGlobals({}, [], (calls) => {
+    assert.doesNotThrow(() => sendDangerAlertToFamily({
+      statusObj: { zh: '🔴 明顯偏低', id: '🔴 Sangat Rendah' },
+      avgSys: 85, avgDia: 48, avgPul: 90,
+      dateString: '7/2 03:15'
+    }));
+    assert.strictEqual(calls.length, 0);
+  });
+});
+
+// P0.3 — Supabase 寫入失敗 fail loudly
+
+runTest('writeToSupabase returns true and skips fetch when unconfigured', () => {
+  withGasGlobals({}, [], (calls) => {
+    const ok = writeToSupabase({ dateString: '7/2 03:15', avgSys: 120, avgDia: 70, avgPul: 70 });
+    assert.strictEqual(ok, true);
+    assert.strictEqual(calls.length, 0);
+  });
+});
+
+runTest('writeToSupabase returns false on a non-2xx response', () => {
+  withGasGlobals(
+    { SUPABASE_URL: 'https://example.supabase.co', SUPABASE_ANON_KEY: 'key' },
+    [{ code: 500, body: 'server error' }],
+    (calls) => {
+      const ok = writeToSupabase({ dateString: '7/2 03:15', avgSys: 120, avgDia: 70, avgPul: 70 });
+      assert.strictEqual(ok, false);
+      assert.strictEqual(calls.length, 1);
+    }
+  );
+});
+
+runTest('writeToSupabase returns true on a 2xx response', () => {
+  withGasGlobals(
+    { SUPABASE_URL: 'https://example.supabase.co', SUPABASE_ANON_KEY: 'key' },
+    [{ code: 201, body: '' }],
+    (calls) => {
+      const ok = writeToSupabase({ dateString: '7/2 03:15', avgSys: 120, avgDia: 70, avgPul: 70 });
+      assert.strictEqual(ok, true);
+      assert.strictEqual(calls.length, 1);
+    }
+  );
+});
+
+runTest('sendOpsAlert pushes a fixed-category message without leaking raw error details', () => {
+  withGasGlobals({ ALERT_LINE_USER_ID: 'U_SON' }, [{ code: 200 }], (calls) => {
+    sendOpsAlert('Supabase 寫入失敗（回應非 2xx），紀錄時間：7/2 03:15');
+    assert.strictEqual(calls.length, 1);
+    const payload = JSON.parse(calls[0].options.payload);
+    assert.match(payload.messages[0].text, /⚠️ 系統告警/);
+    assert.match(payload.messages[0].text, /Supabase 寫入失敗/);
+  });
+});
+
+runTest('sendOpsAlert silently skips when ALERT_LINE_USER_ID is unset', () => {
+  withGasGlobals({}, [], (calls) => {
+    assert.doesNotThrow(() => sendOpsAlert('anything'));
+    assert.strictEqual(calls.length, 0);
+  });
 });

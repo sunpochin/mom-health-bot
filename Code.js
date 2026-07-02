@@ -51,7 +51,24 @@ function doPost(e) {
 
   // 4. 將資料寫入試算表
   const latestEntry = appendEntry(sheet, bpLine, period);
-  
+
+  // 同步寫入 Supabase 資料庫 (包裝在 try/catch 中以確保 LINE Bot 服務不中斷)
+  // P0.3：寫入失敗不能只 console.error 默默吞掉——雙軌資料默默分岔，
+  // dashboard 會變成謊言，所以失敗要另外推播通知開發者 (fail loudly)。
+  try {
+    const supabaseOk = writeToSupabase(latestEntry);
+    if (!supabaseOk) {
+      sendOpsAlert('Supabase 寫入失敗（回應非 2xx），紀錄時間：' + latestEntry.dateString);
+    }
+  } catch (supabaseErr) {
+    console.error('❌ 同步 Supabase 失敗:', supabaseErr.message || supabaseErr);
+    sendOpsAlert('Supabase 寫入發生例外，紀錄時間：' + latestEntry.dateString);
+  }
+
+  // 4.5 危險等級血壓推播給家屬 (P0.2)：Susi 半夜量到危險值時，兒子的
+  // LINE reply 對話看不到——這是獨立的 push 通知，跟 Susi 的對話完全分開。
+  sendDangerAlertToFamily(latestEntry);
+
   // 5. 讀取最近四筆的歷史紀錄摘要
   const summaries = getRecentSummary(sheet);
 
@@ -433,6 +450,166 @@ function replyToLine(replyToken, messages) {
   UrlFetchApp.fetch(url, options);
 }
 
+/**
+ * 將血壓數據寫入 Supabase 資料表 blood_pressure_records
+ * @param {Object} latestEntry - 量測後的資料物件
+ * @return {boolean} 是否成功寫入。未設定 Supabase 屬性視為刻意略過，回傳 true
+ *   (不算失敗，呼叫端不需要為此發警示)；實際寫入失敗才回傳 false。
+ */
+function writeToSupabase(latestEntry) {
+  const supabaseUrl = PropertiesService.getScriptProperties().getProperty('SUPABASE_URL');
+  const supabaseAnonKey = PropertiesService.getScriptProperties().getProperty('SUPABASE_ANON_KEY');
+
+  if (!supabaseUrl || !supabaseAnonKey) {
+    console.warn('⚠️ 略過 Supabase 寫入：未設定 SUPABASE_URL 或 SUPABASE_ANON_KEY 指令碼屬性');
+    return true;
+  }
+
+  const url = supabaseUrl.replace(/\/$/, '') + '/rest/v1/blood_pressure_records';
+
+  // 解析日期與時間，組合成台北時區的 ISO string (例如 "6/29 16:34" -> "2026-06-29T16:34:00+08:00")
+  const now = new Date();
+  const year = now.getFullYear();
+  const parts = latestEntry.dateString.split(' ');
+  const datePart = parts[0];
+  const timePart = parts[1];
+
+  const [mStr, dStr] = datePart.split('/');
+  const [hStr, minStr] = timePart.split(':');
+
+  const pad = (n) => String(n).padStart(2, '0');
+  const isoString = `${year}-${pad(mStr)}-${pad(dStr)}T${pad(hStr)}:${pad(minStr)}:00+08:00`;
+
+  const payload = {
+    systolic: latestEntry.avgSys,
+    diastolic: latestEntry.avgDia,
+    pulse: latestEntry.avgPul,
+    measured_at: isoString,
+    source: 'line_bot',
+    created_by: 'pengasuh'
+  };
+
+  const options = {
+    method: 'post',
+    contentType: 'application/json',
+    headers: {
+      'apikey': supabaseAnonKey,
+      'Authorization': 'Bearer ' + supabaseAnonKey,
+      'Prefer': 'return=minimal'
+    },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  try {
+    const res = UrlFetchApp.fetch(url, options);
+    const code = res.getResponseCode();
+    if (code >= 200 && code < 300) {
+      console.log('✅ 成功寫入 Supabase');
+      return true;
+    }
+    console.error('❌ 寫入 Supabase 失敗，狀態碼 ' + code + ': ' + res.getContentText());
+    return false;
+  } catch (err) {
+    console.error('❌ 呼叫 Supabase API 發生異常: ' + (err.message || err));
+    return false;
+  }
+}
+
+/**
+ * 透過 LINE Push API 主動發送訊息給指定使用者 (不同於 replyToLine 的
+ * reply API，push 不需要 replyToken，可在任何時候主動發送)。
+ * @param {string} userId - 收件者的 LINE userId
+ * @param {string} message - 要發送的文字內容
+ * @return {boolean} 是否推播成功
+ */
+function pushToLine(userId, message) {
+  const url = 'https://api.line.me/v2/bot/message/push';
+
+  const payload = {
+    to: userId,
+    messages: [{ type: 'text', text: message }]
+  };
+
+  const options = {
+    headers: {
+      'Content-Type': 'application/json; charset=UTF-8',
+      'Authorization': 'Bearer ' + LINE_CHANNEL_ACCESS_TOKEN
+    },
+    method: 'post',
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  };
+
+  const res = UrlFetchApp.fetch(url, options);
+  const code = res.getResponseCode();
+  if (code < 200 || code >= 300) {
+    throw new Error('LINE push 失敗，狀態碼 ' + code + ': ' + res.getContentText());
+  }
+  return true;
+}
+
+/**
+ * 危險等級 (🔴) 血壓推播給家屬 (P0.2)。
+ *
+ * 為什麼需要獨立於 replyToLine 之外：Susi 半夜量到危險值時，回覆訊息只會
+ * 出現在她跟 bot 的對話裡，兒子不會主動看到。這裡用 LINE Push API 主動
+ * 通知一個獨立的收件人 (兒子的 LINE userId)，跟 Susi 的照護對話完全分開。
+ *
+ * 訊息格式刻意固定為「等級＋數值＋時間」，不夾帶其他內容 (參考
+ * bahasa-tw-bot 的告警慣例：alert 訊息只帶固定分類標籤，不外洩多餘內容)。
+ *
+ * @param {Object} latestEntry - 量測後的資料物件 (含 statusObj、avgSys、avgDia、avgPul、dateString)
+ */
+function sendDangerAlertToFamily(latestEntry) {
+  // 判定標準表 (appscript/blood_pressure_bot_docs.md) 裡，只有「極高危險」
+  // 「明顯偏高」「明顯偏低」三個危險等級用 🔴，其餘 (⚠️ 偏高/偏低、🟡 觀察)
+  // 都不推播——警報分級、寧缺勿濫，避免 alarm fatigue。
+  const isDangerLevel = latestEntry.statusObj.zh.indexOf('🔴') === 0;
+  if (!isDangerLevel) return;
+
+  const alertUserId = PropertiesService.getScriptProperties().getProperty('ALERT_LINE_USER_ID');
+  if (!alertUserId) {
+    console.warn('⚠️ 略過危險血壓推播：未設定 ALERT_LINE_USER_ID 指令碼屬性');
+    return;
+  }
+
+  const message = [
+    '🔴 媽媽血壓警示',
+    latestEntry.statusObj.zh,
+    `${latestEntry.avgSys} / ${latestEntry.avgDia} / ${latestEntry.avgPul}`,
+    latestEntry.dateString
+  ].join('\n');
+
+  try {
+    pushToLine(alertUserId, message);
+    console.log('✅ 已推播危險血壓警示給家屬');
+  } catch (err) {
+    console.error('❌ 推播危險血壓警示失敗: ' + (err.message || err));
+  }
+}
+
+/**
+ * 系統運作面失敗時通知開發者 (P0.3 fail loudly)，例如 Supabase 寫入失敗。
+ * 訊息內容刻意只帶固定分類文字，不夾帶原始錯誤細節 (可能含 URL/金鑰片段)，
+ * 完整錯誤還是要靠 console.error 進 Apps Script 執行紀錄查。
+ * @param {string} summary - 固定分類的簡短描述
+ */
+function sendOpsAlert(summary) {
+  const alertUserId = PropertiesService.getScriptProperties().getProperty('ALERT_LINE_USER_ID');
+  if (!alertUserId) {
+    console.warn('⚠️ 略過 ops 警示推播：未設定 ALERT_LINE_USER_ID 指令碼屬性');
+    return;
+  }
+
+  try {
+    pushToLine(alertUserId, '⚠️ 系統告警\n' + summary);
+    console.log('✅ 已推播 ops 警示');
+  } catch (err) {
+    console.error('❌ 推播 ops 警示失敗: ' + (err.message || err));
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     buildReplyBlock,
@@ -441,6 +618,10 @@ if (typeof module !== 'undefined' && module.exports) {
     getBpStatus,
     getDefaultPeriod,
     getTodayDateString,
-    replyToLine
+    replyToLine,
+    writeToSupabase,
+    pushToLine,
+    sendDangerAlertToFamily,
+    sendOpsAlert
   };
 }
