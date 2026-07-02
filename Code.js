@@ -5,6 +5,24 @@
 // 專案完全無法執行 —— 這才是這幾輪 doPost 一直顯示 Failed 的真正原因，
 // 跟訊息內容、events 陣列、try/catch 都無關。已加 .claspignore 排除它，
 // 這行註解只是為了讓這次 push 產生真正的內容差異，強制觸發實際同步。
+/**
+ * 【暫時診斷用】直接觸碰 SpreadsheetApp 跟 UrlFetchApp，用來手動觸發
+ * Google 的授權同意畫面。連結/變更 GCP project 之後，之前的授權會失效，
+ * 但用編輯器手動執行 doPost() 因為沒有真正的 e 參數，會在
+ * e.postData 那行就先炸掉，永遠碰不到這兩個服務，也就永遠不會跳出
+ * 同意畫面。這支函式不依賴任何參數，直接呼叫這兩個服務，執行它才會
+ * 真正觸發授權提示。確認權限恢復正常後就會移除這支函式。
+ */
+function authorizeScopes() {
+  const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
+  SpreadsheetApp.openById(spreadsheetId);
+  UrlFetchApp.fetch('https://api.line.me/v2/bot/info', {
+    headers: { 'Authorization': 'Bearer ' + LINE_CHANNEL_ACCESS_TOKEN },
+    muteHttpExceptions: true
+  });
+  console.log('✅ authorizeScopes 執行完成，如果沒有跳出授權視窗代表已經有權限了');
+}
+
 // 從腳本屬性中安全地取得 LINE Channel Access Token
 const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
   ? PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN')
