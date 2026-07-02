@@ -476,24 +476,34 @@ function getRecentSummary(sheet) {
  */
 function replyToLine(replyToken, messages) {
   const url = 'https://api.line.me/v2/bot/message/reply';
-  
+
   // 確保傳入的是陣列
   const messageArray = Array.isArray(messages) ? messages : [messages];
-  
+
   const payload = {
     replyToken: replyToken,
     messages: messageArray.map(msg => ({ type: 'text', text: msg }))
   };
-  
+
   const options = {
     headers: {
       'Content-Type': 'application/json; charset=UTF-8',
       'Authorization': 'Bearer ' + LINE_CHANNEL_ACCESS_TOKEN
     },
     method: 'post',
-    payload: JSON.stringify(payload)
+    payload: JSON.stringify(payload),
+    // 沒有這個的話，GAS 的 UrlFetchApp.fetch() 遇到 LINE 回傳非 2xx
+    // (例如 replyToken 已過期或被用過、額度限制) 會直接拋例外——這跟
+    // Node 測試裡 fetch 的行為不同，是我們一直沒模擬到的測試盲點。
+    muteHttpExceptions: true
   };
-  UrlFetchApp.fetch(url, options);
+  const res = UrlFetchApp.fetch(url, options);
+  const code = res.getResponseCode();
+  if (code < 200 || code >= 300) {
+    console.error('❌ LINE 回覆失敗，狀態碼 ' + code + ': ' + res.getContentText());
+    return false;
+  }
+  return true;
 }
 
 /**

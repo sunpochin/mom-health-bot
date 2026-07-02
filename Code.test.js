@@ -11,6 +11,7 @@ const {
   parseBpEntries,
   parseHeaderLine,
   pushToLine,
+  replyToLine,
   sendDangerAlertToFamily,
   sendOpsAlert,
   writeToSupabase
@@ -402,4 +403,35 @@ runTest('doPost does not throw even if it cannot recover a replyToken to report 
   } finally {
     delete global.ContentService;
   }
+});
+
+// replyToLine — real GAS UrlFetchApp.fetch() throws on non-2xx unless
+// muteHttpExceptions is set, unlike our Node mock. This was missing here
+// (present on pushToLine/writeToSupabase already) — a real blind spot in
+// the test suite: everything passed in Node while the real GAS runtime
+// could have thrown on an expired/reused replyToken.
+
+runTest('replyToLine returns true on a 2xx response', () => {
+  withGasGlobals({}, [{ code: 200 }], (calls) => {
+    const ok = replyToLine('RT1', 'hello');
+    assert.strictEqual(ok, true);
+    assert.strictEqual(calls.length, 1);
+  });
+});
+
+runTest('replyToLine returns false (not throws) on a non-2xx response', () => {
+  withGasGlobals({}, [{ code: 400, body: 'Invalid reply token' }], (calls) => {
+    assert.doesNotThrow(() => {
+      const ok = replyToLine('EXPIRED', 'hello');
+      assert.strictEqual(ok, false);
+    });
+    assert.strictEqual(calls.length, 1);
+  });
+});
+
+runTest('replyToLine request sets muteHttpExceptions so GAS will not throw on 4xx/5xx', () => {
+  withGasGlobals({}, [{ code: 200 }], (calls) => {
+    replyToLine('RT1', 'hello');
+    assert.strictEqual(calls[0].options.muteHttpExceptions, true);
+  });
 });
