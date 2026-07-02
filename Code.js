@@ -11,7 +11,12 @@ const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
 function doPost(e) {
   // 解析 LINE 傳來的 JSON 格式資料
   const event = JSON.parse(e.postData.contents).events[0];
-  
+
+  // 【暫時診斷用】為了取得 ALERT_LINE_USER_ID 要填的值而加的一行 log，
+  // 只印 event.source（userId/groupId/type），不影響任何回覆或判讀邏輯。
+  // 取得 userId、設定好 Script Property 後就會移除這行並重新部署。
+  console.log('👤 event.source: ' + JSON.stringify(event.source));
+
   // 只處理文字訊息，其餘類型一律忽略以保持群組安靜
   if (event.type !== 'message' || event.message.type !== 'text') {
     return ContentService.createTextOutput("Success");
