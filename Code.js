@@ -3,25 +3,7 @@
 // 沒有模組隔離、所有檔案共用同一個頂層作用域，這會造成
 // "Identifier 'xxx' has already been declared" 的 SyntaxError，讓整個
 // 專案完全無法執行 —— 這才是這幾輪 doPost 一直顯示 Failed 的真正原因，
-// 跟訊息內容、events 陣列、try/catch 都無關。已加 .claspignore 排除它，
-// 這行註解只是為了讓這次 push 產生真正的內容差異，強制觸發實際同步。
-/**
- * 【暫時診斷用】直接觸碰 SpreadsheetApp 跟 UrlFetchApp，用來手動觸發
- * Google 的授權同意畫面。連結/變更 GCP project 之後，之前的授權會失效，
- * 但用編輯器手動執行 doPost() 因為沒有真正的 e 參數，會在
- * e.postData 那行就先炸掉，永遠碰不到這兩個服務，也就永遠不會跳出
- * 同意畫面。這支函式不依賴任何參數，直接呼叫這兩個服務，執行它才會
- * 真正觸發授權提示。確認權限恢復正常後就會移除這支函式。
- */
-function authorizeScopes() {
-  const spreadsheetId = '1EZJzRoOBkWDnaD3hUEeZGHIWv5zh5slsgpI3hzQCDKM';
-  SpreadsheetApp.openById(spreadsheetId);
-  UrlFetchApp.fetch('https://api.line.me/v2/bot/info', {
-    headers: { 'Authorization': 'Bearer ' + LINE_CHANNEL_ACCESS_TOKEN },
-    muteHttpExceptions: true
-  });
-  console.log('✅ authorizeScopes 執行完成，如果沒有跳出授權視窗代表已經有權限了');
-}
+// 跟訊息內容、events 陣列、try/catch 都無關。已加 .claspignore 排除它。
 
 // 從腳本屬性中安全地取得 LINE Channel Access Token
 const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
@@ -34,27 +16,17 @@ const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
  * @return {TextOutput} 回傳給 LINE 的成功訊息
  */
 function doPost(e) {
-  // 這個專案目前沒有連結任何看得到的 GCP project，Cloud Logging 讀不到、
-  // clasp tail-logs 也讀不到，導致 doPost 內部噴的例外完全看不到內容
-  // (執行紀錄只顯示 Failed，沒有訊息)。在正式接上 GCP project 之前，
-  // 先用「把例外文字直接回覆到 LINE」當診斷手段——不吞掉錯誤，至少
-  // 傳訊息的人自己看得到炸在哪裡。取得足夠診斷資訊、確認穩定後會拿掉
-  // 回覆原始錯誤文字的部分，改成只留 console.error + sendOpsAlert。
+  // handleDoPost 的例外統一在這裡攔截，確保任何未預期錯誤都不會讓
+  // doPost 整個掛掉、也不會被靜默吞掉——fail loudly，不是靠訊息傳送
+  // 者自己發現「怎麼都沒回覆」，而是直接推播通知開發者 (sendOpsAlert)。
+  // 推播內容只帶固定分類文字，不夾帶原始錯誤訊息 (可能包含不該外洩的
+  // 內容)，完整細節仍要靠 console.error 進 Cloud Logging 查
+  // (Executions 頁籤或 `clasp tail-logs`)。
   try {
     return handleDoPost(e);
   } catch (err) {
-    const stackText = (err && err.stack) || (err && err.message) || String(err);
-    console.error('❌ doPost 例外: ' + stackText);
-    try {
-      const events = JSON.parse(e.postData.contents).events;
-      const replyToken = events && events[0] && events[0].replyToken;
-      if (replyToken) {
-        replyToLine(replyToken, '🐛 DEBUG (暫時診斷用，之後會移除):\n' + stackText);
-      }
-    } catch (nestedErr) {
-      // 連取得 replyToken 都失敗 (例如 e.postData 本身就是壞的)，
-      // 這裡已經沒有任何管道能回報，只能靠上面的 console.error。
-    }
+    console.error('❌ doPost 例外: ' + ((err && err.stack) || (err && err.message) || String(err)));
+    sendOpsAlert('doPost 發生未預期例外，時間：' + new Date().toISOString());
     return ContentService.createTextOutput("Success");
   }
 }
@@ -70,18 +42,12 @@ function handleDoPost(e) {
 
   // LINE 的 webhook「驗證」測試 ping 會送出 events 為空陣列的請求；
   // 舊版程式碼直接存取 events[0] 沒檢查，遇到這種請求會在下一行對
-  // undefined 取屬性直接噴例外，執行紀錄顯示 Failed 且沒有任何 log
-  // (連下面 console.log 那行的參數都還沒求值完成就已經噴掉)。
+  // undefined 取屬性直接噴例外，執行紀錄顯示 Failed。
   if (!events || events.length === 0) {
     return ContentService.createTextOutput("Success");
   }
 
   const event = events[0];
-
-  // 【暫時診斷用】為了取得 ALERT_LINE_USER_ID 要填的值而加的一行 log，
-  // 只印 event.source（userId/groupId/type），不影響任何回覆或判讀邏輯。
-  // 取得 userId、設定好 Script Property 後就會移除這行並重新部署。
-  console.log('👤 event.source: ' + JSON.stringify(event.source));
 
   // 只處理文字訊息，其餘類型一律忽略以保持群組安靜
   if (event.type !== 'message' || event.message.type !== 'text') {
@@ -90,24 +56,16 @@ function handleDoPost(e) {
 
   const userMessage = event.message.text;
   const replyToken = event.replyToken;
-  
+
   // 1. 從文字中提取兩組完整的血壓與脈搏數值 (Susi 當下登錄的格式)
   const bpLine = extractBpLine(userMessage);
-  
+
   // 若格式不符 (數字不足或格式不對)
   if (!bpLine) {
     // 只有在訊息「看起來像是在輸入血壓」(包含數字與斜線 /) 時，才給予錯誤提示
     // 若只是一般聊天或日常禮貌用語 (例如 "Terima kasih"、"hi")，則已讀不回，保持群組安靜
     if (/\d/.test(userMessage) && /\//.test(userMessage)) {
       replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙\n128/65/75 | 123/63/73");
-    } else {
-      // 【暫時診斷用】這個專案沒有連結 GCP project，Cloud Logging 讀不到，
-      // 所以原本印 event.source 的 console.log 完全看不到內容。這裡改用
-      // 已經證實有效的管道 (LINE 回覆) 暫時取代「已讀不回」，直接把
-      // event.source 回傳給傳訊息的人，讓他能親眼看到自己的 userId。
-      // 拿到 userId、設定好 ALERT_LINE_USER_ID 後就會拿掉，恢復原本
-      // 的靜默行為。
-      replyToLine(replyToken, '🐛 DEBUG userId (暫時診斷用):\n' + JSON.stringify(event.source));
     }
     return ContentService.createTextOutput("Success");
   }

@@ -349,15 +349,15 @@ runTest('doPost does not throw when events key is missing entirely', () => {
   }
 });
 
-// doPost — top-level try/catch (temporary debug channel: reply the raw
-// exception via LINE, since this project has no linked GCP project yet so
-// Cloud Logging shows nothing). This must never let an exception escape
-// doPost uncaught, since GAS then shows "Failed" with zero information.
+// doPost — top-level try/catch. This must never let an exception escape
+// doPost uncaught (GAS then shows "Failed" with zero information reaching
+// anyone); instead it fails loudly via sendOpsAlert to the developer,
+// without leaking raw error text into the alert itself.
 
-runTest('doPost catches an internal exception and replies it back via LINE (temp debug)', () => {
+runTest('doPost catches an internal exception and alerts the developer instead of crashing', () => {
   global.ContentService = { createTextOutput: (text) => ({ text, getContent: () => text }) };
   try {
-    withGasGlobals({}, [{ code: 200 }], (calls) => {
+    withGasGlobals({ ALERT_LINE_USER_ID: 'U_SON' }, [{ code: 200 }], (calls) => {
       // A valid BP-format message reaches SpreadsheetApp.openById(), which
       // doesn't exist in this Node test environment — a real, unmocked
       // exception, not a hand-crafted one.
@@ -378,22 +378,21 @@ runTest('doPost catches an internal exception and replies it back via LINE (temp
       assert.strictEqual(result.getContent(), 'Success');
       assert.strictEqual(calls.length, 1);
       const body = JSON.parse(calls[0].options.payload);
-      assert.strictEqual(body.replyToken, 'RT123');
-      assert.match(body.messages[0].text, /🐛 DEBUG/);
-      assert.match(body.messages[0].text, /SpreadsheetApp/);
+      assert.strictEqual(body.to, 'U_SON');
+      assert.match(body.messages[0].text, /系統告警/);
+      assert.doesNotMatch(body.messages[0].text, /SpreadsheetApp/);
     });
   } finally {
     delete global.ContentService;
   }
 });
 
-runTest('doPost does not throw even if it cannot recover a replyToken to report the error', () => {
+runTest('doPost does not throw on malformed postData, even with no alert configured', () => {
   global.ContentService = { createTextOutput: (text) => ({ text, getContent: () => text }) };
   try {
     withGasGlobals({}, [], (calls) => {
-      // Malformed postData.contents (not valid JSON at all) — the nested
-      // try/catch for extracting replyToken also fails; doPost must still
-      // return normally instead of throwing all the way up to GAS.
+      // Malformed postData.contents (not valid JSON at all) — doPost must
+      // still return normally instead of throwing all the way up to GAS.
       assert.doesNotThrow(() => {
         const result = doPost({ postData: { contents: 'not json' } });
         assert.strictEqual(result.getContent(), 'Success');
@@ -436,15 +435,13 @@ runTest('replyToLine request sets muteHttpExceptions so GAS will not throw on 4x
   });
 });
 
-// doPost — temporary debug-userId reply for non-BP messages (e.g. "hi").
-// Cloud Logging is unreachable (no linked GCP project), so this replaces
-// the console.log-based userId lookup with LINE's reply channel, which we
-// already confirmed works.
+// doPost — non-BP messages like "hi" stay silent (anti-spam behavior),
+// no debug reply, no LINE call at all.
 
-runTest('doPost replies with event.source for a non-BP message like "hi" (temp debug)', () => {
+runTest('doPost silently ignores a non-BP message like "hi" (no reply)', () => {
   global.ContentService = { createTextOutput: (text) => ({ text, getContent: () => text }) };
   try {
-    withGasGlobals({}, [{ code: 200 }], (calls) => {
+    withGasGlobals({}, [], (calls) => {
       const payload = {
         postData: {
           contents: JSON.stringify({
@@ -459,11 +456,7 @@ runTest('doPost replies with event.source for a non-BP message like "hi" (temp d
       };
       const result = doPost(payload);
       assert.strictEqual(result.getContent(), 'Success');
-      assert.strictEqual(calls.length, 1);
-      const body = JSON.parse(calls[0].options.payload);
-      assert.strictEqual(body.replyToken, 'RT_HI');
-      assert.match(body.messages[0].text, /🐛 DEBUG userId/);
-      assert.match(body.messages[0].text, /U_REAL_SON/);
+      assert.strictEqual(calls.length, 0);
     });
   } finally {
     delete global.ContentService;
