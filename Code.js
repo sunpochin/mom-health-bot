@@ -82,6 +82,14 @@ function handleDoPost(e) {
     // 若只是一般聊天或日常禮貌用語 (例如 "Terima kasih"、"hi")，則已讀不回，保持群組安靜
     if (/\d/.test(userMessage) && /\//.test(userMessage)) {
       replyToLine(replyToken, "Format salah.\nKirim 2 set data tekanan darah, misalnya:\n🌙\n128/65/75 | 123/63/73");
+    } else {
+      // 【暫時診斷用】這個專案沒有連結 GCP project，Cloud Logging 讀不到，
+      // 所以原本印 event.source 的 console.log 完全看不到內容。這裡改用
+      // 已經證實有效的管道 (LINE 回覆) 暫時取代「已讀不回」，直接把
+      // event.source 回傳給傳訊息的人，讓他能親眼看到自己的 userId。
+      // 拿到 userId、設定好 ALERT_LINE_USER_ID 後就會拿掉，恢復原本
+      // 的靜默行為。
+      replyToLine(replyToken, '🐛 DEBUG userId (暫時診斷用):\n' + JSON.stringify(event.source));
     }
     return ContentService.createTextOutput("Success");
   }

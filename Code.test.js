@@ -435,3 +435,37 @@ runTest('replyToLine request sets muteHttpExceptions so GAS will not throw on 4x
     assert.strictEqual(calls[0].options.muteHttpExceptions, true);
   });
 });
+
+// doPost — temporary debug-userId reply for non-BP messages (e.g. "hi").
+// Cloud Logging is unreachable (no linked GCP project), so this replaces
+// the console.log-based userId lookup with LINE's reply channel, which we
+// already confirmed works.
+
+runTest('doPost replies with event.source for a non-BP message like "hi" (temp debug)', () => {
+  global.ContentService = { createTextOutput: (text) => ({ text, getContent: () => text }) };
+  try {
+    withGasGlobals({}, [{ code: 200 }], (calls) => {
+      const payload = {
+        postData: {
+          contents: JSON.stringify({
+            events: [{
+              type: 'message',
+              replyToken: 'RT_HI',
+              message: { type: 'text', text: 'hi' },
+              source: { type: 'user', userId: 'U_REAL_SON' }
+            }]
+          })
+        }
+      };
+      const result = doPost(payload);
+      assert.strictEqual(result.getContent(), 'Success');
+      assert.strictEqual(calls.length, 1);
+      const body = JSON.parse(calls[0].options.payload);
+      assert.strictEqual(body.replyToken, 'RT_HI');
+      assert.match(body.messages[0].text, /🐛 DEBUG userId/);
+      assert.match(body.messages[0].text, /U_REAL_SON/);
+    });
+  } finally {
+    delete global.ContentService;
+  }
+});
