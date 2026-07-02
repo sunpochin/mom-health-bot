@@ -1,3 +1,10 @@
+// Code.test.js 不應該出現在這個 GAS 專案裡：它用 Node 的 require()/
+// 解構賦值宣告跟這裡同名的頂層變數 (doPost、buildReplyBlock...)，GAS
+// 沒有模組隔離、所有檔案共用同一個頂層作用域，這會造成
+// "Identifier 'xxx' has already been declared" 的 SyntaxError，讓整個
+// 專案完全無法執行 —— 這才是這幾輪 doPost 一直顯示 Failed 的真正原因，
+// 跟訊息內容、events 陣列、try/catch 都無關。已加 .claspignore 排除它，
+// 這行註解只是為了讓這次 push 產生真正的內容差異，強制觸發實際同步。
 // 從腳本屬性中安全地取得 LINE Channel Access Token
 const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
   ? PropertiesService.getScriptProperties().getProperty('LINE_CHANNEL_ACCESS_TOKEN')
