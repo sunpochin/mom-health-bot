@@ -9,6 +9,37 @@ const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
  * @return {TextOutput} 回傳給 LINE 的成功訊息
  */
 function doPost(e) {
+  // 這個專案目前沒有連結任何看得到的 GCP project，Cloud Logging 讀不到、
+  // clasp tail-logs 也讀不到，導致 doPost 內部噴的例外完全看不到內容
+  // (執行紀錄只顯示 Failed，沒有訊息)。在正式接上 GCP project 之前，
+  // 先用「把例外文字直接回覆到 LINE」當診斷手段——不吞掉錯誤，至少
+  // 傳訊息的人自己看得到炸在哪裡。取得足夠診斷資訊、確認穩定後會拿掉
+  // 回覆原始錯誤文字的部分，改成只留 console.error + sendOpsAlert。
+  try {
+    return handleDoPost(e);
+  } catch (err) {
+    const stackText = (err && err.stack) || (err && err.message) || String(err);
+    console.error('❌ doPost 例外: ' + stackText);
+    try {
+      const events = JSON.parse(e.postData.contents).events;
+      const replyToken = events && events[0] && events[0].replyToken;
+      if (replyToken) {
+        replyToLine(replyToken, '🐛 DEBUG (暫時診斷用，之後會移除):\n' + stackText);
+      }
+    } catch (nestedErr) {
+      // 連取得 replyToken 都失敗 (例如 e.postData 本身就是壞的)，
+      // 這裡已經沒有任何管道能回報，只能靠上面的 console.error。
+    }
+    return ContentService.createTextOutput("Success");
+  }
+}
+
+/**
+ * doPost 實際處理邏輯，拆出來讓外層 try/catch 能包住整個流程。
+ * @param {Object} e - 同 doPost 的參數
+ * @return {TextOutput}
+ */
+function handleDoPost(e) {
   // 解析 LINE 傳來的 JSON 格式資料
   const events = JSON.parse(e.postData.contents).events;
 

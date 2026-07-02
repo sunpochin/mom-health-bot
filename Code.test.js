@@ -347,3 +347,59 @@ runTest('doPost does not throw when events key is missing entirely', () => {
     delete global.ContentService;
   }
 });
+
+// doPost — top-level try/catch (temporary debug channel: reply the raw
+// exception via LINE, since this project has no linked GCP project yet so
+// Cloud Logging shows nothing). This must never let an exception escape
+// doPost uncaught, since GAS then shows "Failed" with zero information.
+
+runTest('doPost catches an internal exception and replies it back via LINE (temp debug)', () => {
+  global.ContentService = { createTextOutput: (text) => ({ text, getContent: () => text }) };
+  try {
+    withGasGlobals({}, [{ code: 200 }], (calls) => {
+      // A valid BP-format message reaches SpreadsheetApp.openById(), which
+      // doesn't exist in this Node test environment — a real, unmocked
+      // exception, not a hand-crafted one.
+      const payload = {
+        postData: {
+          contents: JSON.stringify({
+            events: [{
+              type: 'message',
+              replyToken: 'RT123',
+              message: { type: 'text', text: '128/65/75 | 123/63/73' },
+              source: { type: 'user', userId: 'U_TEST' }
+            }]
+          })
+        }
+      };
+
+      const result = doPost(payload);
+      assert.strictEqual(result.getContent(), 'Success');
+      assert.strictEqual(calls.length, 1);
+      const body = JSON.parse(calls[0].options.payload);
+      assert.strictEqual(body.replyToken, 'RT123');
+      assert.match(body.messages[0].text, /🐛 DEBUG/);
+      assert.match(body.messages[0].text, /SpreadsheetApp/);
+    });
+  } finally {
+    delete global.ContentService;
+  }
+});
+
+runTest('doPost does not throw even if it cannot recover a replyToken to report the error', () => {
+  global.ContentService = { createTextOutput: (text) => ({ text, getContent: () => text }) };
+  try {
+    withGasGlobals({}, [], (calls) => {
+      // Malformed postData.contents (not valid JSON at all) — the nested
+      // try/catch for extracting replyToken also fails; doPost must still
+      // return normally instead of throwing all the way up to GAS.
+      assert.doesNotThrow(() => {
+        const result = doPost({ postData: { contents: 'not json' } });
+        assert.strictEqual(result.getContent(), 'Success');
+      });
+      assert.strictEqual(calls.length, 0);
+    });
+  } finally {
+    delete global.ContentService;
+  }
+});
