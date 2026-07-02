@@ -1,6 +1,7 @@
 const assert = require('assert');
 const Code = require('./Code.js');
 const {
+  doPost,
   buildReplyBlock,
   detectPeriod,
   extractBpLine,
@@ -318,4 +319,31 @@ runTest('sendOpsAlert silently skips when ALERT_LINE_USER_ID is unset', () => {
     assert.doesNotThrow(() => sendOpsAlert('anything'));
     assert.strictEqual(calls.length, 0);
   });
+});
+
+// doPost — LINE's webhook "Verify" ping sends `events: []`, and older code
+// crashed on that (events[0] is undefined, next line throws on undefined.type)
+
+runTest('doPost does not throw when LINE sends an empty events array (verify ping)', () => {
+  global.ContentService = {
+    createTextOutput: (text) => ({ text, getContent: () => text })
+  };
+  try {
+    const result = doPost({ postData: { contents: JSON.stringify({ events: [] }) } });
+    assert.strictEqual(result.getContent(), 'Success');
+  } finally {
+    delete global.ContentService;
+  }
+});
+
+runTest('doPost does not throw when events key is missing entirely', () => {
+  global.ContentService = {
+    createTextOutput: (text) => ({ text, getContent: () => text })
+  };
+  try {
+    const result = doPost({ postData: { contents: JSON.stringify({}) } });
+    assert.strictEqual(result.getContent(), 'Success');
+  } finally {
+    delete global.ContentService;
+  }
 });

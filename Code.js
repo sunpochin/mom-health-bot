@@ -10,7 +10,17 @@ const LINE_CHANNEL_ACCESS_TOKEN = (typeof PropertiesService !== 'undefined')
  */
 function doPost(e) {
   // 解析 LINE 傳來的 JSON 格式資料
-  const event = JSON.parse(e.postData.contents).events[0];
+  const events = JSON.parse(e.postData.contents).events;
+
+  // LINE 的 webhook「驗證」測試 ping 會送出 events 為空陣列的請求；
+  // 舊版程式碼直接存取 events[0] 沒檢查，遇到這種請求會在下一行對
+  // undefined 取屬性直接噴例外，執行紀錄顯示 Failed 且沒有任何 log
+  // (連下面 console.log 那行的參數都還沒求值完成就已經噴掉)。
+  if (!events || events.length === 0) {
+    return ContentService.createTextOutput("Success");
+  }
+
+  const event = events[0];
 
   // 【暫時診斷用】為了取得 ALERT_LINE_USER_ID 要填的值而加的一行 log，
   // 只印 event.source（userId/groupId/type），不影響任何回覆或判讀邏輯。
@@ -617,6 +627,7 @@ function sendOpsAlert(summary) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    doPost,
     buildReplyBlock,
     detectPeriod,
     extractBpLine,
